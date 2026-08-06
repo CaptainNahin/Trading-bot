@@ -1,0 +1,124 @@
+[project]
+name = "quantedge-live-gateway"
+version = "0.1.0"
+description = "QuantEdge Live Market Gateway - secure live market intelligence backend exposing MCP and HTTP transports."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+
+dependencies = [
+    "mcp>=1.9.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.6.0",
+    "httpx>=0.27.0",
+    "websockets>=13.0",
+    "pandas>=2.2.0",
+    "numpy>=1.26.0",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+    "pyyaml>=6.0.2",
+    "python-dotenv>=1.0.1",
+    "tenacity>=9.0.0",
+]
+
+[project.optional-dependencies]
+postgres = [
+    "psycopg[binary]>=3.2.0",
+]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+    "mypy>=1.13.0",
+    "types-pyyaml>=6.0.12",
+    "pandas-stubs>=2.2.0",
+    "respx>=0.21.1",
+]
+
+[project.scripts]
+quantedge-mcp = "quantedge.mcp_server.__main__:main"
+quantedge-api = "quantedge.api.__main__:main"
+quantedge-worker = "quantedge.workers.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quantedge"]
+
+# ---------------------------------------------------------------- ruff
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # comprehensions
+    "UP",   # pyupgrade
+    "ASYNC",# flake8-async
+    "S",    # bandit security
+    "DTZ",  # flake8-datetimez -- enforces timezone-aware datetimes
+    "RUF",
+]
+ignore = [
+    "S101",  # assert is fine in tests and internal invariants
+    "B008",  # FastAPI Depends() in defaults is idiomatic
+    "RUF012",# mutable class attrs without ClassVar
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S105", "S106", "S311"]
+"src/quantedge/providers/llm/*" = ["S105"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["quantedge"]
+
+# ---------------------------------------------------------------- mypy
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["quantedge"]
+strict = false
+warn_return_any = false
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = false
+ignore_missing_imports = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*", "migrations.*"]
+disallow_untyped_defs = false
+ignore_errors = true
+
+# ---------------------------------------------------------------- pytest
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers"
+markers = [
+    "unit: deterministic tests with no external I/O",
+    "contract: provider payload normalization against recorded fixtures",
+    "integration: in-process wiring across components (no third-party network)",
+    "live: hits real external networks; excluded from default runs",
+    "adversarial: malformed, hostile or degraded input handling",
+]
+filterwarnings = ["ignore::DeprecationWarning"]

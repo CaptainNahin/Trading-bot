@@ -1,0 +1,112 @@
+# =============================================================================
+# Symbol allowlist and normalization
+# =============================================================================
+# Only symbols listed here can be requested. This is a security control
+# (input allowlisting) as well as a correctness control -- it guarantees every
+# symbol has a known asset class, tick size context and currency mapping.
+# =============================================================================
+
+# Canonical form used everywhere inside the system:
+#   crypto  -> BASEQUOTE, uppercase, no separator   (BTCUSDT)
+#   forex   -> BASEQUOTE, uppercase, no separator   (EURUSD)
+#   others  -> vendor-neutral uppercase ticker      (XAUUSD, SPX, AAPL)
+normalization:
+  uppercase: true
+  strip_characters: ["/", "-", "_", ":", " "]
+  # Provider-specific rendering is handled by each adapter's mapping module,
+  # e.g. canonical EURUSD -> Twelve Data "EUR/USD" -> OANDA "EUR_USD".
+
+crypto:
+  asset_class: crypto
+  quote_currency_risk: [USD]     # crypto risk is mapped to broad USD events
+  symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - BNBUSDT
+    - SOLUSDT
+    - XRPUSDT
+    - ADAUSDT
+    - DOGEUSDT
+    - AVAXUSDT
+    - LINKUSDT
+    - MATICUSDT
+    - LTCUSDT
+    - DOTUSDT
+
+# Default Binance streaming set (overridable via BINANCE_STREAM_SYMBOLS)
+default_stream_symbols:
+  - BTCUSDT
+  - ETHUSDT
+  - BNBUSDT
+  - SOLUSDT
+  - XRPUSDT
+
+forex:
+  asset_class: forex
+  symbols:
+    - EURUSD
+    - GBPUSD
+    - USDJPY
+    - AUDUSD
+    - USDCAD
+    - USDCHF
+    - NZDUSD
+    - EURGBP
+    - EURJPY
+    - GBPJPY
+    - AUDJPY
+    - EURAUD
+
+# Currency mapping drives economic-event risk. Explicit, not inferred.
+currency_map:
+  EURUSD: [EUR, USD]
+  GBPUSD: [GBP, USD]
+  USDJPY: [USD, JPY]
+  AUDUSD: [AUD, USD]
+  USDCAD: [USD, CAD]
+  USDCHF: [USD, CHF]
+  NZDUSD: [NZD, USD]
+  EURGBP: [EUR, GBP]
+  EURJPY: [EUR, JPY]
+  GBPJPY: [GBP, JPY]
+  AUDJPY: [AUD, JPY]
+  EURAUD: [EUR, AUD]
+  XAUUSD: [USD]
+  XAGUSD: [USD]
+
+commodity:
+  asset_class: commodity
+  symbols:
+    - XAUUSD
+    - XAGUSD
+    - WTICOUSD
+    - BCOUSD
+
+index:
+  asset_class: index
+  symbols:
+    - SPX
+    - NDX
+    - DJI
+    - DAX
+    - UK100
+
+stock:
+  asset_class: stock
+  symbols:
+    - AAPL
+    - MSFT
+    - NVDA
+    - AMZN
+    - GOOGL
+    - META
+    - TSLA
+
+# Hard input limits (security: bounded work per request)
+limits:
+  max_symbols_per_request: 25
+  max_candles_per_request: 1000
+  max_order_book_depth: 100
+  max_recent_trades: 500
+  max_stream_symbols: 20
+  max_stream_intervals: 4

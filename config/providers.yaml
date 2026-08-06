@@ -1,0 +1,168 @@
+# =============================================================================
+# Provider configuration
+# =============================================================================
+# `enabled: true` here means "the operator wants this provider considered".
+# A provider is only actually usable when its credentials are also present --
+# that check happens at runtime and is reported by provider_health().
+# Credentials NEVER appear in this file. They come from environment variables.
+# =============================================================================
+
+defaults:
+  timeout_seconds: 10.0
+  connect_timeout_seconds: 5.0
+  max_retries: 3
+  backoff_base_seconds: 0.5
+  backoff_max_seconds: 8.0
+  backoff_jitter: true
+  circuit_breaker:
+    failure_threshold: 5        # consecutive failures before opening
+    recovery_seconds: 30.0      # time before a half-open trial request
+
+providers:
+
+  # ---------------------------------------------------------------- crypto
+  binance:
+    kind: market_data
+    enabled: true
+    requires_credentials: false        # public market-data endpoints only
+    asset_classes: [crypto]
+    priority: 10                        # lower = preferred
+    rate_limit:
+      requests_per_minute: 1000        # conservative vs Binance's 6000 weight/min
+      burst: 50
+    capabilities:
+      quote: true
+      candles: true
+      order_book: true
+      recent_trades: true
+      stream: true
+      symbols: true
+    notes: >
+      Market-data-only base URL data-api.binance.vision. No signed requests, no
+      account/wallet/margin/futures endpoints are implemented at all.
+
+  # ---------------------------------------------------------------- forex / multi-asset
+  oanda:
+    kind: market_data
+    enabled: true
+    requires_credentials: true
+    credential_env: [OANDA_API_TOKEN, OANDA_ACCOUNT_ID]
+    asset_classes: [forex, commodity, index]
+    priority: 10                        # preferred for forex when configured
+    rate_limit:
+      requests_per_minute: 100
+      burst: 10
+    capabilities:
+      quote: true                       # true bid/ask with real spread
+      candles: true
+      order_book: false                 # OANDA is not an order-book venue
+      recent_trades: false
+      stream: false                     # not implemented in this version
+      symbols: true
+    notes: >
+      Read-only pricing and candles. Order/trade endpoints are deliberately not
+      implemented. Defaults to the practice environment.
+
+  twelvedata:
+    kind: market_data
+    enabled: true
+    requires_credentials: true
+    credential_env: [TWELVE_DATA_API_KEY]
+    asset_classes: [forex, stock, index, commodity, crypto]
+    priority: 20                        # forex fallback behind OANDA
+    rate_limit:
+      requests_per_minute: 8            # free plan: 8 credits/min
+      burst: 4
+      requests_per_day: 800             # free plan: 800 credits/day
+    capabilities:
+      quote: true
+      candles: true
+      order_book: false
+      recent_trades: false
+      stream: false                     # websocket requires a paid plan
+      symbols: true
+    notes: >
+      Free plan gives 8 requests/minute and 800/day and excludes websockets.
+      The rate limiter enforces both windows; caching prevents duplicate spend.
+
+  # ---------------------------------------------------------------- calendar / news
+  fmp:
+    kind: economic_calendar
+    enabled: true
+    requires_credentials: true
+    credential_env: [FMP_API_KEY]
+    priority: 10
+    rate_limit:
+      requests_per_minute: 10
+      requests_per_day: 250
+    capabilities:
+      economic_calendar: true
+      market_news: true
+      symbol_news: true
+    notes: >
+      The economic-calendar endpoint is NOT included in Financial Modeling Prep's
+      free tier; it returns 402/403 without a paid plan. The adapter detects this
+      and self-reports `degraded` rather than pretending the endpoint exists.
+
+  finnhub:
+    kind: economic_calendar
+    enabled: true
+    requires_credentials: true
+    credential_env: [FINNHUB_API_KEY]
+    priority: 20
+    rate_limit:
+      requests_per_minute: 60
+    capabilities:
+      economic_calendar: true          # premium-gated on free keys
+      market_news: true                # free
+      symbol_news: true                # free
+    notes: >
+      /calendar/economic requires a premium plan and returns 403 on free keys.
+      General and company news are available on the free tier.
+
+  alphavantage:
+    kind: news
+    enabled: true
+    requires_credentials: true
+    credential_env: [ALPHA_VANTAGE_API_KEY]
+    priority: 30
+    rate_limit:
+      requests_per_minute: 5
+      requests_per_day: 25
+    capabilities:
+      economic_calendar: false         # Alpha Vantage has no economic calendar
+      market_news: true                # NEWS_SENTIMENT
+      symbol_news: true
+    notes: >
+      Alpha Vantage publishes no economic-calendar endpoint. The capability is
+      declared false so the event-risk service never routes calendar calls here.
+
+# ---------------------------------------------------------------- routing
+routing:
+  # First enabled + credentialled + healthy provider wins. Order is explicit;
+  # the provider that served a response is always recorded on the response.
+  market_data:
+    crypto: [binance, twelvedata]
+    forex: [oanda, twelvedata]
+    stock: [twelvedata]
+    index: [twelvedata, oanda]
+    commodity: [twelvedata, oanda]
+  economic_calendar: [fmp, finnhub]
+  news: [finnhub, fmp, alphavantage]
+
+  # When no provider in the chain can serve a request, return a structured
+  # failure. Never substitute a different asset class or a stale cache entry
+  # beyond its TTL, and never blend two providers into one series.
+  allow_cross_provider_series: false
+
+# ---------------------------------------------------------------- caching
+cache:
+  quote_ttl_seconds: 2
+  candles_ttl_seconds: 15
+  closed_candles_ttl_seconds: 300
+  order_book_ttl_seconds: 2
+  symbols_ttl_seconds: 3600
+  events_ttl_seconds: 900
+  news_ttl_seconds: 300
+  max_entries: 5000
+  backend: memory                      # memory | redis (redis interface reserved)

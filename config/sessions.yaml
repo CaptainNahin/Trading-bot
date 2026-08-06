@@ -1,0 +1,79 @@
+# =============================================================================
+# Trading sessions (UTC)
+# =============================================================================
+# Session windows are expressed in UTC and evaluated against timezone-aware
+# UTC timestamps only. DST is NOT auto-applied -- these are approximate liquidity
+# windows used as *context*, never as a precise exchange calendar.
+# The session engine reports which windows are open and an overlap flag; it
+# never claims an exchange is open for trading purposes.
+# =============================================================================
+
+sessions:
+  sydney:
+    label: Sydney
+    start_utc: "21:00"
+    end_utc: "06:00"          # wraps midnight
+    currencies: [AUD, NZD]
+    typical_liquidity: low
+
+  tokyo:
+    label: Tokyo
+    start_utc: "00:00"
+    end_utc: "09:00"
+    currencies: [JPY, AUD, NZD]
+    typical_liquidity: medium
+
+  london:
+    label: London
+    start_utc: "07:00"
+    end_utc: "16:00"
+    currencies: [GBP, EUR, CHF]
+    typical_liquidity: high
+
+  new_york:
+    label: New York
+    start_utc: "12:00"
+    end_utc: "21:00"
+    currencies: [USD, CAD]
+    typical_liquidity: high
+
+# Windows where two high-liquidity sessions overlap.
+overlaps:
+  london_new_york:
+    label: London / New York overlap
+    start_utc: "12:00"
+    end_utc: "16:00"
+    typical_liquidity: highest
+  tokyo_london:
+    label: Tokyo / London overlap
+    start_utc: "07:00"
+    end_utc: "09:00"
+    typical_liquidity: medium
+
+# Weekend handling. Crypto trades continuously; forex does not.
+weekend:
+  # Forex market close/open, UTC. Friday 21:00 -> Sunday 21:00 (approximate).
+  forex_close: { weekday: 4, time_utc: "21:00" }   # 0=Mon .. 6=Sun
+  forex_open:  { weekday: 6, time_utc: "21:00" }
+  crypto_continuous: true
+
+# Low-liquidity windows worth flagging as a contradiction in scoring.
+thin_liquidity_windows:
+  - label: Post-NY close / pre-Sydney
+    start_utc: "21:00"
+    end_utc: "23:00"
+    applies_to: [forex]
+  - label: Daily rollover
+    start_utc: "21:00"
+    end_utc: "22:00"
+    applies_to: [forex, crypto]
+    note: Spreads commonly widen around broker daily rollover.
+
+# How session state feeds the scanner.
+scoring:
+  # These are evidence weights for a deterministic heuristic score.
+  # They are NOT probabilities and are never presented as such.
+  high_liquidity_bonus: 0.10
+  overlap_bonus: 0.05
+  thin_liquidity_penalty: -0.15
+  weekend_forex_penalty: -1.0        # effectively blocks forex candidates

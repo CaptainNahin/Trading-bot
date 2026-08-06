@@ -1,0 +1,112 @@
+# =============================================================================
+# Scanner configuration
+# =============================================================================
+# The scanner is fully deterministic. Every number produced here is a
+# transparent, reproducible heuristic score -- NOT a probability, NOT an
+# accuracy figure, NOT a win rate. Naming is enforced by tests.
+# =============================================================================
+
+# Multi-timeframe triples per analysis horizon.
+#   execution    -> where the setup is measured
+#   confirmation -> one step up, must not contradict
+#   regime       -> broad context
+horizons:
+  "1m":  { execution: "1m",  confirmation: "5m",  regime: "15m", lookback: 300 }
+  "3m":  { execution: "3m",  confirmation: "15m", regime: "1h",  lookback: 300 }
+  "5m":  { execution: "5m",  confirmation: "15m", regime: "1h",  lookback: 300 }
+  "10m": { execution: "10m", confirmation: "30m", regime: "4h",  lookback: 300 }
+  "15m": { execution: "15m", confirmation: "1h",  regime: "4h",  lookback: 300 }
+  "30m": { execution: "30m", confirmation: "4h",  regime: "1d",  lookback: 300 }
+  "1h":  { execution: "1h",  confirmation: "4h",  regime: "1d",  lookback: 300 }
+
+# Minimum bars required before any indicator output is trusted.
+# Driven by the slowest indicator warm-up (EMA200 / SMA200).
+warmup:
+  minimum_bars: 210
+  strict_minimum_bars: 250       # below this the candidate is DEGRADED
+  ema_200_warmup: 200
+  adx_14_warmup: 28              # 14 for DM smoothing + 14 for DX smoothing
+  macd_warmup: 35                # 26 slow EMA + 9 signal
+  bollinger_warmup: 20
+  atr_14_warmup: 15
+
+# Hard gates. A candidate failing ANY gate is rejected with a stated reason
+# and never reaches the LLM.
+gates:
+  require_quality_status: [PASS, DEGRADED]   # FAIL always blocks
+  min_data_quality_score: 0.60
+  max_quote_staleness_ms: 15000
+  max_candle_staleness_multiplier: 2.5       # vs. timeframe duration
+  block_on_event_risk: [HIGH]
+  block_on_unknown_event_risk: false         # UNKNOWN warns, does not block
+  block_weekend_forex: true
+  require_closed_candles: true               # forming candle never scored
+  min_evidence_agreement_score: 0.50
+
+# Deterministic evidence weights. Sum of absolute weights is normalized.
+# Renaming any of these to accuracy/probability/win-rate is prohibited.
+weights:
+  trend:
+    ema_alignment: 0.30            # 9>20>50>200 (or inverse)
+    ema_slope: 0.20
+    adx_strength: 0.25
+    structure_hh_hl: 0.25
+  momentum:
+    rsi_position: 0.30
+    macd_histogram: 0.30
+    roc: 0.20
+    body_ratio: 0.20
+  volatility:
+    atr_percentile: 0.40
+    bollinger_width: 0.30
+    realized_vol: 0.30
+  composite:
+    trend_score: 0.35
+    momentum_score: 0.30
+    volatility_score: 0.15
+    data_quality_score: 0.10
+    evidence_agreement_score: 0.10
+
+# Thresholds for the deterministic regime classifier.
+regime:
+  adx_strong_trend: 25.0
+  adx_weak_trend: 18.0
+  adx_range_max: 18.0
+  bb_width_low_vol_percentile: 25.0
+  bb_width_high_vol_percentile: 75.0
+  atr_shock_multiplier: 2.5        # ATR vs its own rolling mean
+  breakout_lookback: 20
+  breakout_atr_buffer: 0.25        # close must clear the level by 0.25 ATR
+  rsi_overbought: 70.0
+  rsi_oversold: 30.0
+
+# Structure detection.
+structure:
+  swing_lookback: 5                # bars each side; confirmation costs `lookback` bars
+  swing_confirmation_bars: 5       # NO forward-looking pivots: a swing is only
+                                   # confirmed after this many later bars exist
+  min_swings_for_structure: 4
+  breakout_confirmation_bars: 1
+  failed_breakout_bars: 3
+
+# Ranking and output.
+output:
+  default_limit: 3
+  max_limit: 10
+  min_heuristic_score_to_return: 0.55
+  include_rejections: true
+  max_rejections_returned: 25
+
+# LLM escalation. The LLM is expensive and is NOT called per tick.
+llm_escalation:
+  enabled: true
+  min_heuristic_score: 0.70        # only strong deterministic candidates escalate
+  max_calls_per_scan: 2
+  min_seconds_between_calls_per_symbol: 300
+  require_quality_status: [PASS]   # DEGRADED never escalates
+
+# Scanner worker cadence.
+worker:
+  interval_seconds: 60
+  max_symbols_per_cycle: 12
+  enabled_asset_classes: [crypto]  # forex added once a forex provider is healthy
