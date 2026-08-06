@@ -113,6 +113,15 @@ class _CandleBuffer:
     def __len__(self) -> int:
         return len(self._closed)
 
+    def __bool__(self) -> bool:
+        """Always truthy.
+
+        Without this, ``__len__`` would make a buffer that holds only a forming
+        bar indistinguishable from a missing buffer under ``if buffer:``, which
+        silently hid live forming candles until it was caught in testing.
+        """
+        return True
+
 
 class CollectorHealth:
     """Point-in-time view of collector state, safe to serialize to a client."""
@@ -194,6 +203,9 @@ class MarketStreamCollector:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._task
             self._task = None
+        # Close the socket while the loop is still running; leaving it to GC
+        # races interpreter shutdown.
+        await self._client.aclose()
         await self._flush_persist(force=True)
         log.info("market collector stopped", extra=self.stats())
 
@@ -286,7 +298,9 @@ class MarketStreamCollector:
         for it by name via :meth:`forming_candle`.
         """
         buffer = self._buffers.get((normalize_symbol(symbol), timeframe))
-        return buffer.closed(count) if buffer else []
+        # `is None`, not truthiness: _CandleBuffer defines __len__, so a buffer
+        # holding only a forming bar is falsy despite existing.
+        return buffer.closed(count) if buffer is not None else []
 
     def forming_candle(self, symbol: str, timeframe: Timeframe) -> Candle | None:
         """The current incomplete bar, if any.
@@ -296,7 +310,7 @@ class MarketStreamCollector:
         fed to indicators or treated as historical evidence.
         """
         buffer = self._buffers.get((normalize_symbol(symbol), timeframe))
-        return buffer.forming if buffer else None
+        return buffer.forming if buffer is not None else None
 
     def candle_series(
         self, symbol: str, timeframe: Timeframe, count: int | None = None

@@ -37,6 +37,8 @@ import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from quantedge.config import get_settings
+from quantedge.contracts import utc_now
+from quantedge.errors import ProviderUnavailableError
 from quantedge.logging import get_logger
 from quantedge.providers.binance import mapping
 from quantedge.symbols import normalize_symbol
@@ -49,6 +51,24 @@ log = get_logger(__name__)
 _MAX_CONNECTION_SECONDS = 23 * 3600
 _DEFAULT_STALE_SECONDS = 90.0
 _DEDUPE_CAPACITY = 4096
+
+# Give up after this many consecutive connections that yielded no message at
+# all. A reconnect loop is meant to ride out a network blip, not to retry a
+# broken build forever.
+_MAX_BARREN_ATTEMPTS = 5
+
+# Errors that mean "this code is wrong", not "the network hiccuped". Retrying
+# these forever burns CPU and hides the defect behind a plausible-looking
+# reconnect log, which is exactly how a NameError once masqueraded as an outage
+# here. They are re-raised immediately.
+_PROGRAMMING_ERRORS = (
+    NameError,
+    AttributeError,
+    TypeError,
+    ImportError,
+    IndentationError,
+    UnboundLocalError,
+)
 
 
 @dataclass(slots=True)
@@ -147,6 +167,34 @@ class BinanceStreamClient:
         self.stats = StreamStats()
         self._dedupe = _DedupeWindow()
         self._stop = asyncio.Event()
+        self._socket: Any = None
+
+    # ------------------------------------------------------------------ #
+    # lifecycle                                                          #
+    # ------------------------------------------------------------------ #
+
+    async def __aenter__(self) -> BinanceStreamClient:
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        await self.aclose()
+
+    async def aclose(self) -> None:
+        """Stop the loop and close the socket deterministically.
+
+        A consumer that leaves ``async for`` via ``break`` suspends the
+        generator at its ``yield`` rather than finishing it, so the generator's
+        own ``finally`` never runs and the socket survives until garbage
+        collection -- which, at interpreter shutdown, races the event loop and
+        produces "aclose(): asynchronous generator is already running". Calling
+        this (or using the client as an async context manager) closes the socket
+        while the loop is still alive.
+        """
+        self._stop.set()
+        socket, self._socket = self._socket, None
+        if socket is not None:
+            with contextlib.suppress(Exception):
+                await socket.close()
 
     # ------------------------------------------------------------------ #
     # stream naming                                                      #
@@ -222,9 +270,11 @@ class BinanceStreamClient:
         self.stats.subscribed_streams = streams
         url = self._combined_url(streams)
         attempt = 0
+        barren_attempts = 0
 
         while not self._stop.is_set():
             socket: Any = None
+            messages_at_connect = self.stats.messages_received
             try:
                 socket = await websockets.connect(
                     url,
@@ -233,6 +283,7 @@ class BinanceStreamClient:
                     close_timeout=5,
                     max_queue=1024,
                 )
+                self._socket = socket
                 attempt = 0  # a successful connect resets backoff
                 self.stats.connected = True
                 self.stats.connect_count += 1
@@ -276,6 +327,14 @@ class BinanceStreamClient:
             except asyncio.CancelledError:
                 self.stats.connected = False
                 raise
+            except _PROGRAMMING_ERRORS:
+                # A defect in this module. Reconnecting cannot fix it, and
+                # swallowing it would turn a one-line bug into a silent,
+                # permanently-degraded feed. Fail loudly instead.
+                self.stats.connected = False
+                self.stats.last_error = "internal error (see traceback)"
+                log.exception("stream loop hit a programming error; not retrying")
+                raise
             except (ConnectionClosed, WebSocketException, OSError) as exc:
                 self.stats.last_error = f"{type(exc).__name__}: {exc}"
                 log.warning(
@@ -287,12 +346,26 @@ class BinanceStreamClient:
                 log.error("unexpected stream error", extra={"error": type(exc).__name__})
             finally:
                 self.stats.connected = False
+                self._socket = None
                 if socket is not None:
                     with contextlib.suppress(Exception):
                         await socket.close()
 
             if self._stop.is_set():
                 break
+
+            # A connection that delivered nothing did not really work, however
+            # cleanly it opened. Track those separately from ordinary drops.
+            if self.stats.messages_received == messages_at_connect:
+                barren_attempts += 1
+                if barren_attempts >= _MAX_BARREN_ATTEMPTS:
+                    raise ProviderUnavailableError(
+                        "binance",
+                        f"{barren_attempts} consecutive connections delivered no messages; "
+                        f"last error: {self.stats.last_error or 'none'}",
+                    )
+            else:
+                barren_attempts = 0
 
             delay = self._backoff(attempt)
             attempt += 1
@@ -326,10 +399,26 @@ class BinanceStreamClient:
         try:
             if event_type == "kline":
                 candle = mapping.normalize_kline_event(data)
-                key = (
+                kline = data.get("k") or {}
+                base = (
                     f"k:{candle.symbol}:{candle.timeframe.value}:"
-                    f"{int(candle.open_time_utc.timestamp())}:{int(candle.is_closed)}"
+                    f"{int(candle.open_time_utc.timestamp())}"
                 )
+
+                if candle.is_closed:
+                    # A bar closes exactly once. Any repeat is a replay from a
+                    # reconnect and must not be counted twice.
+                    key = f"{base}:closed"
+                else:
+                    # A forming bar legitimately updates many times per minute,
+                    # each with new OHLC. Keying only on open_time would collapse
+                    # every update into one "duplicate" and freeze the live price
+                    # at the first tick of the minute. Mixing in the event time
+                    # and the bar's monotonically-growing volume/trade count keeps
+                    # genuine updates distinct while still catching exact replays.
+                    revision = data.get("E") or f"{kline.get('v')}:{kline.get('n')}"
+                    key = f"{base}:forming:{revision}"
+
                 if self._dedupe.is_duplicate(key):
                     self.stats.duplicates_rejected += 1
                     return None

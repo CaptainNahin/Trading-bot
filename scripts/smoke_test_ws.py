@@ -35,7 +35,7 @@ async def main() -> None:
     book_count = 0
     start = asyncio.get_event_loop().time()
 
-    try:
+    async with client:
         async for event in client.stream(symbols, intervals, include_book_ticker=True):
             if event.kind == "kline":
                 kline_count += 1
@@ -48,17 +48,14 @@ async def main() -> None:
             elif event.kind == "book_ticker":
                 book_count += 1
                 quote = event.payload
-                print(
-                    f"   [book ] {quote.symbol} bid={quote.bid} ask={quote.ask} "
-                    f"spread={quote.spread}"
-                )
+                if book_count <= 3 or book_count % 50 == 0:
+                    print(
+                        f"   [book ] #{book_count} {quote.symbol} bid={quote.bid} "
+                        f"ask={quote.ask} spread={quote.spread}"
+                    )
 
-            elapsed = asyncio.get_event_loop().time() - start
-            if elapsed > 10.0:
-                client.stop()
+            if asyncio.get_event_loop().time() - start > 10.0:
                 break
-    except asyncio.CancelledError:
-        pass
 
     print(
         f"   OK: Received {kline_count} kline events and {book_count} book_ticker events\n"
@@ -71,30 +68,53 @@ async def main() -> None:
     )
     await collector.start()
     await asyncio.sleep(15.0)
+    # Capture health while it is still running -- stopping first would report
+    # "not running" for a collector that worked perfectly.
+    health = collector.health()
+    stats = collector.stats()
+    coverage = collector.coverage()
+    cached = {
+        symbol: (
+            collector.closed_candles(symbol, Timeframe.M1),
+            collector.forming_candle(symbol, Timeframe.M1),
+            collector.latest_quote(symbol),
+        )
+        for symbol in symbols
+    }
     await collector.stop()
 
-    health = collector.health()
     print(f"   Status: {health.status.value}")
     print(f"   Message: {health.to_dict()['message']}")
-    print(f"   Events processed: {collector.stats()['events_processed']}")
-    print(f"   Closed bars stored: {collector.stats()['closed_bars_stored']}")
-    print(f"   Coverage: {collector.coverage()}")
+    print(f"   Events processed: {stats['events_processed']}")
+    print(f"   Closed bars stored: {stats['closed_bars_stored']}")
+    print(f"   Coverage: {coverage}")
 
-    for symbol in symbols:
-        closed = collector.closed_candles(symbol, Timeframe.M1)
-        forming = collector.forming_candle(symbol, Timeframe.M1)
-        print(
-            f"   {symbol}: {len(closed)} closed bars, forming={forming is not None}"
-        )
+    for symbol, (closed, forming, quote) in cached.items():
+        print(f"   {symbol}: {len(closed)} closed bars, forming={forming is not None}")
         if closed:
             last = closed[-1]
             print(
                 f"      Last closed: {last.open_time_utc.strftime('%H:%M')} "
                 f"O={last.open} H={last.high} L={last.low} C={last.close}"
             )
-        quote = collector.latest_quote(symbol)
+        if forming is not None:
+            print(
+                f"      Forming (excluded from history): "
+                f"{forming.open_time_utc.strftime('%H:%M')} C={forming.close}"
+            )
         if quote:
             print(f"      Quote: bid={quote.bid} ask={quote.ask} spread={quote.spread}")
+
+    # The forming bar must never appear in closed history.
+    leaked = [
+        symbol
+        for symbol, (closed, _f, _q) in cached.items()
+        if any(not candle.is_closed for candle in closed)
+    ]
+    if leaked:
+        print(f"\n[FAIL] forming candle leaked into closed history for: {leaked}")
+    else:
+        print("\n[PASS] no forming candle leaked into closed history")
 
     if health.status.value == "ok":
         print("\n[PASS] WebSocket collector is functional.")
