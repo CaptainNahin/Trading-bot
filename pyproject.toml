@@ -96,6 +96,12 @@ ignore = [
 # is what stops one broken or unavailable vendor from failing the import of the
 # whole routing layer. See ProviderRegistry._build.
 "src/quantedge/providers/registry.py" = ["PLC0415"]
+# The repository factory imports SQLAlchemy inside the try block on purpose: the
+# in-memory fallback has to survive a failed database import, not just a failed
+# connection, so the factory must not hard-require SQLAlchemy at module scope.
+# memory.py borrows _window_start from sql.py the same way. See get_repository.
+"src/quantedge/repositories/__init__.py" = ["PLC0415"]
+"src/quantedge/repositories/memory.py" = ["PLC0415"]
 # Diagnostic smoke scripts: they deliberately probe private helpers to prove a
 # parser rejects bad input, and they catch broadly so one failed section still
 # reports the rest. They are operator tools, not shipped library code.
