@@ -57,6 +57,14 @@ if TYPE_CHECKING:
 
     from quantedge.contracts import Candle, CandleSeries
 
+    # What these functions actually accept. Every one of them starts with
+    # ``np.asarray(..., dtype=float)``, so a list and an ndarray are equally
+    # valid inputs -- and they are routinely chained, one indicator's ndarray
+    # output feeding the next one's input. Declaring ``Sequence[float]`` was
+    # narrower than the real contract (an ndarray is not a Sequence) and made
+    # every such chained call a type error.
+    FloatArrayLike = Sequence[float] | np.ndarray
+
 __all__ = [
     "WARMUP_BARS",
     "adx",
@@ -114,7 +122,7 @@ SLOPE_LOOKBACK = 5
 # --------------------------------------------------------------------------- #
 
 
-def sma(values: Sequence[float], period: int) -> np.ndarray:
+def sma(values: FloatArrayLike, period: int) -> np.ndarray:
     """Simple moving average. Positions before warm-up are ``NaN``.
 
     ``NaN`` rather than a truncated array so every returned series stays index-
@@ -131,7 +139,7 @@ def sma(values: Sequence[float], period: int) -> np.ndarray:
     return out
 
 
-def ema(values: Sequence[float], period: int) -> np.ndarray:
+def ema(values: FloatArrayLike, period: int) -> np.ndarray:
     """Exponential moving average, seeded with the SMA of the first ``period``.
 
     Uses the standard ``alpha = 2 / (period + 1)``. For Wilder's smoothing --
@@ -148,7 +156,7 @@ def ema(values: Sequence[float], period: int) -> np.ndarray:
     return out
 
 
-def _wilder(values: Sequence[float], period: int) -> np.ndarray:
+def _wilder(values: FloatArrayLike, period: int) -> np.ndarray:
     """Wilder's recursive smoothing: ``prev + (x - prev) / period``.
 
     Equivalent to an EMA with ``alpha = 1 / period``. Seeded with the simple
@@ -165,7 +173,7 @@ def _wilder(values: Sequence[float], period: int) -> np.ndarray:
     return out
 
 
-def true_range(high: Sequence[float], low: Sequence[float], close: Sequence[float]) -> np.ndarray:
+def true_range(high: FloatArrayLike, low: FloatArrayLike, close: FloatArrayLike) -> np.ndarray:
     """Wilder's true range. The first element is ``NaN`` -- it has no prior close.
 
     ``max(h-l, |h-prev_close|, |l-prev_close|)``. The gap terms are what make
@@ -190,7 +198,7 @@ def true_range(high: Sequence[float], low: Sequence[float], close: Sequence[floa
 
 
 def atr(
-    high: Sequence[float], low: Sequence[float], close: Sequence[float], period: int = 14
+    high: FloatArrayLike, low: FloatArrayLike, close: FloatArrayLike, period: int = 14
 ) -> np.ndarray:
     """Average true range via Wilder smoothing."""
     tr = true_range(high, low, close)
@@ -201,7 +209,7 @@ def atr(
     return out
 
 
-def rsi(close: Sequence[float], period: int = 14) -> np.ndarray:
+def rsi(close: FloatArrayLike, period: int = 14) -> np.ndarray:
     """Relative strength index, Wilder's original formulation.
 
     A period of pure gains yields exactly 100. That is the defined value, not a
@@ -236,7 +244,7 @@ def rsi(close: Sequence[float], period: int = 14) -> np.ndarray:
 
 
 def macd(
-    close: Sequence[float], fast: int = 12, slow: int = 26, signal: int = 9
+    close: FloatArrayLike, fast: int = 12, slow: int = 26, signal: int = 9
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """MACD line, signal line and histogram.
 
@@ -260,7 +268,7 @@ def macd(
 
 
 def adx(
-    high: Sequence[float], low: Sequence[float], close: Sequence[float], period: int = 14
+    high: FloatArrayLike, low: FloatArrayLike, close: FloatArrayLike, period: int = 14
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Average directional index with +DI and -DI, Wilder's method.
 
@@ -344,7 +352,7 @@ def _wilder_from_first_valid(values: np.ndarray, period: int) -> np.ndarray:
 
 
 def bollinger(
-    close: Sequence[float], period: int = 20, num_std: float = 2.0
+    close: FloatArrayLike, period: int = 20, num_std: float = 2.0
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Bollinger Bands: ``(upper, middle, lower)``.
 
@@ -359,7 +367,7 @@ def bollinger(
     return middle + num_std * std, middle, middle - num_std * std
 
 
-def roc(close: Sequence[float], period: int = 10) -> np.ndarray:
+def roc(close: FloatArrayLike, period: int = 10) -> np.ndarray:
     """Rate of change, in percent, over ``period`` bars."""
     arr = np.asarray(close, dtype=float)
     out = np.full(arr.size, np.nan)
@@ -515,9 +523,11 @@ def compute_features(
     )
 
     bb_up, bb_mid, bb_low = _last(bb_upper), _last(bb_middle), _last(bb_lower)
+    # Checked one at a time rather than with `None not in (...)`: membership
+    # compares by equality, which neither narrows the type nor survives a NaN.
     bb_width = (
         (bb_up - bb_low) / bb_mid * 100.0
-        if None not in (bb_up, bb_mid, bb_low) and bb_mid
+        if bb_up is not None and bb_mid is not None and bb_low is not None and bb_mid
         else None
     )
     # %B places the close within the band: 0 at the lower band, 1 at the upper.
@@ -525,7 +535,7 @@ def compute_features(
     # because a close beyond the band is exactly the signal it encodes.
     bb_percent_b = (
         (last_close - bb_low) / (bb_up - bb_low)
-        if None not in (bb_up, bb_low) and bb_up != bb_low  # type: ignore[operator]
+        if bb_up is not None and bb_low is not None and bb_up != bb_low
         else None
     )
 

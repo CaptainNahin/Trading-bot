@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 
 from quantedge.contracts import (
     AssetClass,
+    CandleSeries,
     DataQualityReport,
     QualityStatus,
     timeframe_seconds,
@@ -47,7 +48,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
 
-    from quantedge.contracts import Candle, CandleSeries, Quote
+    from quantedge.contracts import Candle, Quote, Timeframe
 
 __all__ = [
     "CHECK_NAMES",
@@ -477,12 +478,15 @@ def assess_quality(
     """
     now = now or utc_now()
 
-    if hasattr(series, "closed"):
+    # isinstance rather than hasattr(series, "closed"): it narrows the union for
+    # the type checker, and it does not mistake an unrelated sequence that
+    # happens to expose a `closed` attribute for a CandleSeries.
+    if isinstance(series, CandleSeries):
         bars = list(series.closed)
         series_provider: str | None = series.provider
         asset_class = series.asset_class
         symbol: str | None = series.symbol
-        timeframe = series.timeframe
+        timeframe: Timeframe | None = series.timeframe
     else:
         bars = list(series)
         series_provider = bars[0].provider if bars else None

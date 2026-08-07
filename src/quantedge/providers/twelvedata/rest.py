@@ -133,7 +133,7 @@ class TwelveDataProvider(MarketDataProvider):
 
     def _require_credentials(self) -> str:
         if not self._api_key:
-            raise ProviderDisabledError(self.name, [_CREDENTIAL_ENV])
+            raise ProviderDisabledError(self.name, missing_env=[_CREDENTIAL_ENV])
         return self._api_key
 
     def _params(self, **extra: Any) -> dict[str, Any]:

@@ -121,7 +121,7 @@ class FinnhubProvider(EconomicCalendarProvider):
 
     def _require_credentials(self) -> str:
         if not self._api_key:
-            raise ProviderDisabledError(PROVIDER, [_CREDENTIAL_ENV])
+            raise ProviderDisabledError(PROVIDER, missing_env=[_CREDENTIAL_ENV])
         return self._api_key
 
     async def health_check(self) -> ProviderHealth:

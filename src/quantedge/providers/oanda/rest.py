@@ -166,7 +166,7 @@ class OandaProvider(MarketDataProvider):
 
     def _require_credentials(self) -> tuple[str, str]:
         if not self.credentials_present:
-            raise ProviderDisabledError(PROVIDER, self.missing_env())
+            raise ProviderDisabledError(PROVIDER, missing_env=self.missing_env())
         assert self._token is not None and self._account_id is not None
         return self._token, self._account_id
 

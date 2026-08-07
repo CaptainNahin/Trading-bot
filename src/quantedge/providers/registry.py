@@ -326,8 +326,9 @@ class ProviderRegistry:
             names.extend(chain)
         names.extend(self.calendar_chain())
         names.extend(self.news_chain())
-        seen: set[str] = set()
-        return [n for n in names if not (n in seen or seen.add(n))]
+        # dict preserves insertion order, so this dedups while keeping the
+        # routing order -- which is fallback priority, not an arbitrary listing.
+        return list(dict.fromkeys(names))
 
     async def health(self) -> list[ProviderHealth]:
         """Health of every configured provider, probed concurrently.
