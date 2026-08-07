@@ -23,21 +23,30 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from datetime import datetime, timedelta
+from typing import Any, Literal, Protocol
 
 import httpx
 
+from quantedge.contracts import utc_now
 from quantedge.errors import (
     CircuitOpenError,
     ProviderAuthError,
     ProviderBadResponseError,
+    ProviderError,
     ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderUnavailableError,
 )
 from quantedge.logging import get_logger
 
-__all__ = ["CircuitBreaker", "HttpClientConfig", "RateLimiter", "ResilientHttpClient"]
+__all__ = [
+    "CircuitBreaker",
+    "HttpClientConfig",
+    "QuotaStore",
+    "RateLimiter",
+    "ResilientHttpClient",
+]
 
 log = get_logger(__name__)
 
@@ -67,6 +76,40 @@ class HttpClientConfig:
     user_agent: str = "QuantEdge-Gateway/0.1 (+market-data-only)"
 
 
+class QuotaStore(Protocol):
+    """The slice of the repository this module needs, named structurally.
+
+    Declared as a Protocol rather than importing ``SqlRepository`` so that
+    ``http.py`` -- which every adapter imports -- does not drag SQLAlchemy in
+    behind it, and so a test can pass a hand-written double. Both real
+    repositories satisfy it without knowing this Protocol exists.
+    """
+
+    def consume_quota(
+        self,
+        provider: str,
+        *,
+        window_kind: str = ...,
+        limit: int | None = ...,
+        now: datetime | None = ...,
+    ) -> dict[str, Any]: ...
+
+    def quota_state(
+        self, provider: str, *, window_kind: str = ..., now: datetime | None = ...
+    ) -> dict[str, Any] | None: ...
+
+
+def _seconds_until_utc_midnight(now: datetime) -> float:
+    """How long until the persisted daily window rolls over.
+
+    The durable counter is keyed by calendar day, so this is the honest
+    ``retry_after`` for a spent daily budget -- not a flat 86400, which would
+    tell a caller at 23:58 to come back tomorrow evening.
+    """
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+    return max(0.0, (tomorrow - now).total_seconds())
+
+
 class RateLimiter:
     """Sliding-window limiter over a minute and (optionally) a day.
 
@@ -75,6 +118,19 @@ class RateLimiter:
 
     ``min_interval`` adds burst spacing on top of the windows, for providers
     that additionally cap requests per second.
+
+    The daily cap is enforced twice, deliberately. ``quota_store`` is the
+    authority when one is attached: it is a row in ``provider_quota``, so a
+    25-request daily budget stays spent across restarts. The in-process ``_day``
+    deque remains as a backstop for when the database is unreachable -- it
+    cannot be the authority, because it holds :func:`time.monotonic` values,
+    which have no meaning outside the process that produced them.
+
+    The two windows differ, and the difference is intentional. The deque slides
+    over the last 24 hours; the persisted counter is keyed to the calendar day
+    in UTC, because that is when providers actually reset a daily allowance. The
+    persisted one is therefore the more accurate model, which is why it wins
+    when both are present.
     """
 
     def __init__(
@@ -82,6 +138,9 @@ class RateLimiter:
         per_minute: int | None = None,
         per_day: int | None = None,
         min_interval: float = 0.0,
+        quota_store: QuotaStore | None = None,
+        *,
+        quota_durable: bool = False,
     ) -> None:
         self._per_minute = per_minute
         self._per_day = per_day
@@ -90,6 +149,12 @@ class RateLimiter:
         self._day: deque[float] = deque()
         self._last_request: float | None = None
         self._lock = asyncio.Lock()
+        self._quota_store = quota_store
+        self._quota_durable = quota_durable
+        # Latched so a database that goes down mid-run produces one warning, not
+        # one per request -- but the flag is what `snapshot` reports, so the
+        # degradation stays visible instead of only being in the log.
+        self._quota_store_failed = False
 
     def _prune(self, now: float) -> None:
         while self._minute and now - self._minute[0] > 60.0:
@@ -97,12 +162,63 @@ class RateLimiter:
         while self._day and now - self._day[0] > 86_400.0:
             self._day.popleft()
 
+    async def _consume_durable(self, provider: str) -> bool:
+        """Claim one request against the persisted daily budget.
+
+        Returns True when the store granted it, False when it is spent, and
+        True when there is no store or the store is unreachable -- in which case
+        the caller's in-process backstop is the only remaining limit. Failing
+        open on an infrastructure fault is the lesser evil: refusing every
+        request because the quota table is briefly unavailable turns a database
+        blip into a total outage of a read-only market data gateway.
+        """
+        if self._quota_store is None or self._per_day is None:
+            return True
+
+        store = self._quota_store
+        stamp = utc_now()
+        try:
+            # to_thread because the repositories are synchronous SQLAlchemy; a
+            # direct call would block the event loop for every other provider.
+            state = await asyncio.to_thread(
+                lambda: store.consume_quota(
+                    provider, window_kind="day", limit=self._per_day, now=stamp
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - any store fault must degrade, not propagate
+            if not self._quota_store_failed:
+                self._quota_store_failed = True
+                log.warning(
+                    "durable quota unavailable; falling back to the in-process daily "
+                    "counter, which resets on restart",
+                    extra={"provider": provider, "error": type(exc).__name__},
+                )
+            return True
+
+        if self._quota_store_failed:
+            self._quota_store_failed = False
+            log.info("durable quota recovered", extra={"provider": provider})
+
+        if not state.get("allowed", True):
+            raise ProviderRateLimitError(
+                provider,
+                f"daily request cap of {state.get('requests_allowed')} reached "
+                f"({state.get('requests_made')} used); resets at 00:00 UTC",
+                retry_after_seconds=_seconds_until_utc_midnight(stamp),
+            )
+        return True
+
     async def acquire(self, provider: str) -> None:
         """Wait until a request slot is available.
 
         The daily cap is *not* waited out -- sleeping for hours would hang the
         caller, so we raise and let the caller degrade gracefully.
         """
+        # Outside the lock: this is I/O, and consume_quota is already atomic in
+        # the store. Holding the asyncio lock across a database round-trip would
+        # serialise every request to this provider behind it.
+        await self._consume_durable(provider)
+
         async with self._lock:
             now = time.monotonic()
             self._prune(now)
@@ -137,16 +253,37 @@ class RateLimiter:
             self._minute.append(now)
             self._day.append(now)
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, provider: str | None = None) -> dict[str, Any]:
+        """Current usage. ``daily_cap_durable`` says whether it survives a restart.
+
+        Reported rather than assumed: a caller reading ``used_last_day`` off a
+        process that started a minute ago is reading a number that says nothing
+        about what the provider thinks has been spent today.
+        """
         now = time.monotonic()
         self._prune(now)
-        return {
+        snap: dict[str, Any] = {
             "used_last_minute": len(self._minute),
             "limit_per_minute": self._per_minute,
             "used_last_day": len(self._day),
             "limit_per_day": self._per_day,
             "min_interval_seconds": self._min_interval or None,
+            "daily_cap_durable": bool(
+                self._quota_durable
+                and self._quota_store is not None
+                and not self._quota_store_failed
+            ),
         }
+        if self._quota_store is not None and provider is not None:
+            try:
+                state = self._quota_store.quota_state(provider, window_kind="day")
+            except Exception:  # noqa: BLE001 - a health snapshot must not raise
+                state = None
+            if state is not None:
+                snap["persisted_used_today"] = state["requests_made"]
+                snap["persisted_remaining_today"] = state["remaining"]
+                snap["persisted_window_start_utc"] = state["window_start_utc"]
+        return snap
 
 
 @dataclass
@@ -204,16 +341,20 @@ class ResilientHttpClient:
         config: HttpClientConfig | None = None,
         *,
         default_headers: dict[str, str] | None = None,
+        quota_store: QuotaStore | None = None,
     ) -> None:
         self.provider = provider
         self.base_url = base_url.rstrip("/")
         self.config = config or HttpClientConfig()
         self._headers = {"User-Agent": self.config.user_agent, **(default_headers or {})}
         self._client: httpx.AsyncClient | None = None
+        store, durable = self._resolve_quota_store(quota_store)
         self._limiter = RateLimiter(
             per_minute=self.config.requests_per_minute,
             per_day=self.config.requests_per_day,
             min_interval=self.config.min_interval_seconds,
+            quota_store=store,
+            quota_durable=durable,
         )
         self._breaker = CircuitBreaker(
             failure_threshold=self.config.failure_threshold,
@@ -221,6 +362,44 @@ class ResilientHttpClient:
         )
         self._inflight: dict[str, asyncio.Task[Any]] = {}
         self._lock = asyncio.Lock()
+
+    def _resolve_quota_store(
+        self, override: QuotaStore | None
+    ) -> tuple[QuotaStore | None, bool]:
+        """Find the store backing the daily cap, and say whether it is durable.
+
+        Only wired when this provider actually has a daily cap: Binance has none,
+        and attaching a repository to it would put a database round-trip in front
+        of every candle fetch to buy nothing.
+
+        The import is local and the whole thing is guarded, because a provider
+        adapter has to keep working when the database does not -- the fallback
+        for market data is a slightly stale read, not a dead gateway. Whether the
+        counter actually survives a restart is read from the repository rather
+        than assumed, so a run on the in-memory backend reports
+        ``daily_cap_durable: false`` instead of quietly implying otherwise.
+        """
+        if override is not None:
+            return override, False
+        if self.config.requests_per_day is None:
+            return None, False
+        try:
+            # Local, not module-scope: importing the repository package at the top
+            # of http.py would make every provider adapter import SQLAlchemy, and
+            # a failed database import would then break plain market-data fetches
+            # that never needed a quota row.
+            from quantedge.repositories import (  # noqa: PLC0415
+                describe_persistence,
+                get_repository,
+            )
+
+            return get_repository(), bool(describe_persistence().get("durable"))
+        except Exception as exc:  # noqa: BLE001 - never let storage break a fetch
+            log.warning(
+                "no durable quota store; the daily cap will reset when this process does",
+                extra={"provider": self.provider, "error": type(exc).__name__},
+            )
+            return None, False
 
     # ------------------------------------------------------------------ #
     # lifecycle                                                          #
@@ -263,7 +442,7 @@ class ResilientHttpClient:
         return self._breaker.state
 
     def rate_limit_snapshot(self) -> dict[str, Any]:
-        return self._limiter.snapshot()
+        return self._limiter.snapshot(self.provider)
 
     def _backoff(self, attempt: int) -> float:
         delay = min(
@@ -373,8 +552,13 @@ class ResilientHttpClient:
 
         raise last_error or ProviderUnavailableError(self.provider, "request failed")
 
-    def _classify(self, response: httpx.Response) -> Exception | None:
-        """Map an HTTP status to an error, or ``None`` when it is a success."""
+    def _classify(self, response: httpx.Response) -> ProviderError | None:
+        """Map an HTTP status to an error, or ``None`` when it is a success.
+
+        Narrower than ``Exception`` because the retry loop reads ``.retryable``
+        off the result, and that attribute exists on :class:`ProviderError`
+        alone -- typing this as ``Exception`` made the retry decision unchecked.
+        """
         status = response.status_code
         if 200 <= status < 300:
             return None
