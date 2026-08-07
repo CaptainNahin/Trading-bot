@@ -129,6 +129,7 @@ providers:
     rate_limit:
       requests_per_minute: 5
       requests_per_day: 25
+      min_interval_seconds: 1.2        # free keys also cap bursts at ~1 req/sec
     capabilities:
       economic_calendar: false         # Alpha Vantage has no economic calendar
       market_news: true                # NEWS_SENTIMENT
@@ -136,6 +137,8 @@ providers:
     notes: >
       Alpha Vantage publishes no economic-calendar endpoint. The capability is
       declared false so the event-risk service never routes calendar calls here.
+      Free keys enforce a per-second burst limit separately from the 5/min and
+      25/day quotas; min_interval_seconds spaces requests to respect it.
 
 # ---------------------------------------------------------------- routing
 routing:

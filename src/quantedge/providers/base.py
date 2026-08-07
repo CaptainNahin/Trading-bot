@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from quantedge.contracts import (
@@ -91,6 +91,19 @@ class BaseProvider(abc.ABC):
         """Names of missing credential env vars. **Names only.**"""
         return []
 
+    @property
+    def circuit_state(self) -> str:
+        """Breaker state of the underlying HTTP client: open, closed or half_open.
+
+        Public because routing needs it: an open breaker takes a provider out of
+        rotation, and the registry should not have to reach into a private
+        attribute to find that out. Providers with no HTTP client report
+        ``"closed"`` -- nothing is being deliberately withheld.
+        """
+        client = getattr(self, "_client", None)
+        state = getattr(client, "circuit_state", "closed")
+        return str(state)
+
     async def aclose(self) -> None:
         """Release network resources. Safe to call repeatedly."""
         return None
@@ -103,9 +116,7 @@ class MarketDataProvider(BaseProvider):
     asset_classes: tuple[AssetClass, ...] = ()
 
     @abc.abstractmethod
-    async def list_symbols(
-        self, asset_class: AssetClass | None = None
-    ) -> list[SymbolInfo]:
+    async def list_symbols(self, asset_class: AssetClass | None = None) -> list[SymbolInfo]:
         """Instruments this provider can serve, in canonical form."""
 
     @abc.abstractmethod
@@ -149,9 +160,7 @@ class EconomicCalendarProvider(BaseProvider):
     kind = "economic_calendar"
 
     @abc.abstractmethod
-    async def get_events(
-        self, start_utc: datetime, end_utc: datetime
-    ) -> list[EconomicEvent]:
+    async def get_events(self, start_utc: datetime, end_utc: datetime) -> list[EconomicEvent]:
         """All events in a UTC window."""
 
     async def get_events_for_currencies(
@@ -174,8 +183,6 @@ class EconomicCalendarProvider(BaseProvider):
         window_minutes: int = 60,
     ) -> list[EconomicEvent]:
         """Events within +/- ``window_minutes`` of a timestamp."""
-        from datetime import timedelta
-
         delta = timedelta(minutes=window_minutes)
         return await self.get_events_for_currencies(
             currencies, timestamp_utc - delta, timestamp_utc + delta
@@ -237,9 +244,7 @@ class PersistenceProvider(abc.ABC):
         """Persist an LLM decision. Append-only: never updated in place."""
 
     @abc.abstractmethod
-    async def settle_signal(
-        self, signal_id: str, *, settlement_price: Any = None
-    ) -> SettledSignal:
+    async def settle_signal(self, signal_id: str, *, settlement_price: Any = None) -> SettledSignal:
         """Settle a previously issued decision against realized price."""
 
     @abc.abstractmethod

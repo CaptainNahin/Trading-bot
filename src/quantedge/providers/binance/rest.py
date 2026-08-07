@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 from quantedge.config import get_settings, providers_config
@@ -44,8 +45,16 @@ log = get_logger(__name__)
 
 # Paths that must never appear here. Enforced by test, listed for reviewers.
 FORBIDDEN_PATH_FRAGMENTS = (
-    "/order", "/account", "/myTrades", "/sapi", "/fapi", "/dapi",
-    "/margin", "/capital", "/withdraw", "/userDataStream",
+    "/order",
+    "/account",
+    "/myTrades",
+    "/sapi",
+    "/fapi",
+    "/dapi",
+    "/margin",
+    "/capital",
+    "/withdraw",
+    "/userDataStream",
 )
 
 
@@ -68,8 +77,12 @@ class BinanceRestProvider(MarketDataProvider):
         self._capabilities = provider_cfg.get(
             "capabilities",
             {
-                "quote": True, "candles": True, "order_book": True,
-                "recent_trades": True, "stream": True, "symbols": True,
+                "quote": True,
+                "candles": True,
+                "order_book": True,
+                "recent_trades": True,
+                "stream": True,
+                "symbols": True,
             },
         )
         self._client = ResilientHttpClient(
@@ -111,9 +124,13 @@ class BinanceRestProvider(MarketDataProvider):
         """Ping ``/api/v3/ping`` and report. Never raises."""
         if not self.enabled:
             return ProviderHealth(
-                provider=self.name, kind=self.kind, status=HealthStatus.DISABLED,
-                enabled=False, credentials_present=True,
-                asset_classes=list(self.asset_classes), capabilities=self.capabilities(),
+                provider=self.name,
+                kind=self.kind,
+                status=HealthStatus.DISABLED,
+                enabled=False,
+                credentials_present=True,
+                asset_classes=list(self.asset_classes),
+                capabilities=self.capabilities(),
                 message="disabled in config/providers.yaml",
             )
 
@@ -122,10 +139,14 @@ class BinanceRestProvider(MarketDataProvider):
             await self._client.get_json("/api/v3/ping", dedupe=False)
             latency_ms = (time.perf_counter() - started) * 1000.0
             return ProviderHealth(
-                provider=self.name, kind=self.kind, status=HealthStatus.OK,
-                enabled=True, credentials_present=True,
+                provider=self.name,
+                kind=self.kind,
+                status=HealthStatus.OK,
+                enabled=True,
+                credentials_present=True,
                 latency_ms=round(latency_ms, 2),
-                asset_classes=list(self.asset_classes), capabilities=self.capabilities(),
+                asset_classes=list(self.asset_classes),
+                capabilities=self.capabilities(),
                 message=f"reachable at {self._base_url}",
                 limitations=[
                     "public market data only; no account, order or wallet access",
@@ -135,17 +156,25 @@ class BinanceRestProvider(MarketDataProvider):
             )
         except QuantEdgeError as exc:
             return ProviderHealth(
-                provider=self.name, kind=self.kind, status=HealthStatus.ERROR,
-                enabled=True, credentials_present=True,
-                asset_classes=list(self.asset_classes), capabilities=self.capabilities(),
+                provider=self.name,
+                kind=self.kind,
+                status=HealthStatus.ERROR,
+                enabled=True,
+                credentials_present=True,
+                asset_classes=list(self.asset_classes),
+                capabilities=self.capabilities(),
                 message=exc.message,
                 circuit_state=self._client.circuit_state,  # type: ignore[arg-type]
             )
         except Exception as exc:  # noqa: BLE001 - health must never propagate
             return ProviderHealth(
-                provider=self.name, kind=self.kind, status=HealthStatus.ERROR,
-                enabled=True, credentials_present=True,
-                asset_classes=list(self.asset_classes), capabilities=self.capabilities(),
+                provider=self.name,
+                kind=self.kind,
+                status=HealthStatus.ERROR,
+                enabled=True,
+                credentials_present=True,
+                asset_classes=list(self.asset_classes),
+                capabilities=self.capabilities(),
                 message=f"unexpected error: {type(exc).__name__}",
             )
 
@@ -157,9 +186,7 @@ class BinanceRestProvider(MarketDataProvider):
     # symbols                                                            #
     # ------------------------------------------------------------------ #
 
-    async def list_symbols(
-        self, asset_class: AssetClass | None = None
-    ) -> list[SymbolInfo]:
+    async def list_symbols(self, asset_class: AssetClass | None = None) -> list[SymbolInfo]:
         if asset_class is not None and asset_class is not AssetClass.CRYPTO:
             return []
         await self._refresh_symbols()
@@ -207,9 +234,7 @@ class BinanceRestProvider(MarketDataProvider):
     async def get_quote(self, symbol: str) -> Quote:
         """24h ticker enriched with best bid/ask from bookTicker."""
         canonical = normalize_symbol(symbol)
-        ticker = await self._client.get_json(
-            "/api/v3/ticker/24hr", params={"symbol": canonical}
-        )
+        ticker = await self._client.get_json("/api/v3/ticker/24hr", params={"symbol": canonical})
         book: dict[str, Any] | None = None
         try:
             book_raw = await self._client.get_json(
@@ -233,8 +258,6 @@ class BinanceRestProvider(MarketDataProvider):
         raw = await self._client.get_json("/api/v3/ticker/price", params={"symbol": canonical})
         if not isinstance(raw, dict) or "price" not in raw:
             raise ProviderBadResponseError(self.name, "ticker/price missing 'price'")
-        from decimal import Decimal
-
         return Quote(
             provider=self.name,
             symbol=canonical,
@@ -246,9 +269,7 @@ class BinanceRestProvider(MarketDataProvider):
     async def get_book_ticker(self, symbol: str) -> Quote:
         """Best bid/ask with a real spread."""
         canonical = normalize_symbol(symbol)
-        raw = await self._client.get_json(
-            "/api/v3/ticker/bookTicker", params={"symbol": canonical}
-        )
+        raw = await self._client.get_json("/api/v3/ticker/bookTicker", params={"symbol": canonical})
         if not isinstance(raw, dict):
             raise ProviderBadResponseError(self.name, "bookTicker returned a non-object")
         return mapping.normalize_book_ticker_event({**raw, "s": canonical})
@@ -293,9 +314,7 @@ class BinanceRestProvider(MarketDataProvider):
         candles = [mapping.normalize_kline(row, canonical, timeframe, now=now) for row in raw]
         return self._finalize_series(canonical, timeframe, candles, count, include_forming)
 
-    async def get_spot_candles(
-        self, symbol: str, interval: str, count: int = 200
-    ) -> CandleSeries:
+    async def get_spot_candles(self, symbol: str, interval: str, count: int = 200) -> CandleSeries:
         """Alias required by the project specification."""
         return await self.get_candles(symbol, Timeframe(interval), count)
 
@@ -390,9 +409,7 @@ class BinanceRestProvider(MarketDataProvider):
         )
         book = mapping.normalize_depth(raw, canonical)
         if len(book.bids) > depth or len(book.asks) > depth:
-            book = book.model_copy(
-                update={"bids": book.bids[:depth], "asks": book.asks[:depth]}
-            )
+            book = book.model_copy(update={"bids": book.bids[:depth], "asks": book.asks[:depth]})
         return book
 
     async def get_spot_order_book(self, symbol: str, depth: int = 20) -> OrderBook:

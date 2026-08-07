@@ -141,10 +141,29 @@ class RedactingFilter(logging.Filter):
 
 _RESERVED = frozenset(
     {
-        "args", "asctime", "created", "exc_info", "exc_text", "filename",
-        "funcName", "levelname", "levelno", "lineno", "module", "msecs",
-        "message", "msg", "name", "pathname", "process", "processName",
-        "relativeCreated", "stack_info", "thread", "threadName", "taskName",
+        "args",
+        "asctime",
+        "created",
+        "exc_info",
+        "exc_text",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "module",
+        "msecs",
+        "message",
+        "msg",
+        "name",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "thread",
+        "threadName",
+        "taskName",
     }
 )
 
@@ -195,7 +214,7 @@ def configure_logging(level: str = "INFO", fmt: str = "json", *, force: bool = F
     speaks JSON-RPC over *stdout*, so a single stray stdout log line would
     corrupt the protocol stream and break every tool call.
     """
-    global _configured
+    global _configured  # noqa: PLW0603 - process-wide logging setup, by design
     if _configured and not force:
         return
 

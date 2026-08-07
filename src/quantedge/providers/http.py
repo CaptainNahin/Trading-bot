@@ -54,6 +54,14 @@ class HttpClientConfig:
     backoff_jitter: bool = True
     requests_per_minute: int | None = None
     requests_per_day: int | None = None
+    min_interval_seconds: float = 0.0
+    """Minimum spacing between two requests to this provider.
+
+    Distinct from ``requests_per_minute``: a 5/min budget still permits five
+    calls in the same second, and providers that police a per-second burst
+    (Alpha Vantage's free tier allows 1 request/second) reject that even though
+    the per-minute total is legal.
+    """
     failure_threshold: int = 5
     recovery_seconds: float = 30.0
     user_agent: str = "QuantEdge-Gateway/0.1 (+market-data-only)"
@@ -64,13 +72,23 @@ class RateLimiter:
 
     A sliding window is used rather than a fixed bucket because providers
     measure "requests in the last 60 seconds", not "requests since :00".
+
+    ``min_interval`` adds burst spacing on top of the windows, for providers
+    that additionally cap requests per second.
     """
 
-    def __init__(self, per_minute: int | None = None, per_day: int | None = None) -> None:
+    def __init__(
+        self,
+        per_minute: int | None = None,
+        per_day: int | None = None,
+        min_interval: float = 0.0,
+    ) -> None:
         self._per_minute = per_minute
         self._per_day = per_day
+        self._min_interval = max(0.0, min_interval)
         self._minute: deque[float] = deque()
         self._day: deque[float] = deque()
+        self._last_request: float | None = None
         self._lock = asyncio.Lock()
 
     def _prune(self, now: float) -> None:
@@ -106,6 +124,16 @@ class RateLimiter:
                 now = time.monotonic()
                 self._prune(now)
 
+            # Burst spacing, applied last so it also spaces the request that
+            # just finished waiting out a full window.
+            if self._min_interval and self._last_request is not None:
+                gap = now - self._last_request
+                if gap < self._min_interval:
+                    await asyncio.sleep(self._min_interval - gap)
+                    now = time.monotonic()
+                    self._prune(now)
+
+            self._last_request = now
             self._minute.append(now)
             self._day.append(now)
 
@@ -117,6 +145,7 @@ class RateLimiter:
             "limit_per_minute": self._per_minute,
             "used_last_day": len(self._day),
             "limit_per_day": self._per_day,
+            "min_interval_seconds": self._min_interval or None,
         }
 
 
@@ -184,6 +213,7 @@ class ResilientHttpClient:
         self._limiter = RateLimiter(
             per_minute=self.config.requests_per_minute,
             per_day=self.config.requests_per_day,
+            min_interval=self.config.min_interval_seconds,
         )
         self._breaker = CircuitBreaker(
             failure_threshold=self.config.failure_threshold,
@@ -305,7 +335,7 @@ class ResilientHttpClient:
                 response = await client.request(
                     method, path, params=params, json=json_body, headers=headers
                 )
-            except httpx.TimeoutException as exc:
+            except httpx.TimeoutException:
                 last_error = ProviderTimeoutError(self.provider, self.config.timeout_seconds)
                 self._breaker.record_failure()
             except httpx.HTTPError as exc:
@@ -349,9 +379,7 @@ class ResilientHttpClient:
         if 200 <= status < 300:
             return None
         if status in (401, 403):
-            return ProviderAuthError(
-                self.provider, f"authentication failed (HTTP {status})"
-            )
+            return ProviderAuthError(self.provider, f"authentication failed (HTTP {status})")
         if status in (429, 418):
             retry_after: float | None = None
             raw = response.headers.get("Retry-After")

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from enum import StrEnum
 
+from quantedge.errors import UnsupportedTimeframeError
+
 __all__ = [
     "TIMEFRAME_SECONDS",
     "AssetClass",
@@ -71,8 +73,6 @@ def timeframe_seconds(timeframe: Timeframe | str) -> int:
     UnsupportedTimeframeError
         If the value is not an allowlisted timeframe.
     """
-    from quantedge.errors import UnsupportedTimeframeError
-
     try:
         tf = Timeframe(str(timeframe).lower())
     except ValueError as exc:
@@ -89,7 +89,7 @@ class QualityStatus(StrEnum):
     ``FAIL`` is a hard gate: no candidate and no LLM analysis may be released.
     """
 
-    PASS = "PASS"
+    PASS = "PASS"  # noqa: S105 - a quality verdict, not a credential
     DEGRADED = "DEGRADED"
     FAIL = "FAIL"
 

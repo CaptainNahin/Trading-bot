@@ -69,17 +69,37 @@ select = [
     "ASYNC",# flake8-async
     "S",    # bandit security
     "DTZ",  # flake8-datetimez -- enforces timezone-aware datetimes
+    "BLE",  # blind except -- swallowing errors is how fabricated data gets in
+    "SLF",  # private member access across module boundaries
+    "PL",   # pylint
+    "SIM",  # flake8-simplify
     "RUF",
 ]
 ignore = [
     "S101",  # assert is fine in tests and internal invariants
     "B008",  # FastAPI Depends() in defaults is idiomatic
     "RUF012",# mutable class attrs without ClassVar
+    # HTTP status codes, epoch-second constants and field-count checks read
+    # better as literals than as named constants; naming `200` adds a lookup
+    # without adding meaning. Kept off globally rather than suppressed ~30 times.
+    "PLR2004",
+    # Complexity metrics. The long functions here are flat validation and
+    # normalization sequences -- splitting them to satisfy a statement count
+    # would scatter one linear check across several call frames.
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915",
 ]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106", "S311"]
 "src/quantedge/providers/llm/*" = ["S105"]
+# The registry imports each adapter inside its own match arm on purpose: that
+# is what stops one broken or unavailable vendor from failing the import of the
+# whole routing layer. See ProviderRegistry._build.
+"src/quantedge/providers/registry.py" = ["PLC0415"]
+# Diagnostic smoke scripts: they deliberately probe private helpers to prove a
+# parser rejects bad input, and they catch broadly so one failed section still
+# reports the rest. They are operator tools, not shipped library code.
+"scripts/**" = ["BLE001", "SLF001", "S105", "S311", "T201", "PLC0415"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["quantedge"]

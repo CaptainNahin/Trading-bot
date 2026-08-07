@@ -301,9 +301,7 @@ class BinanceStreamClient:
                         break
 
                     try:
-                        raw = await asyncio.wait_for(
-                            socket.recv(), timeout=self._stale_seconds
-                        )
+                        raw = await asyncio.wait_for(socket.recv(), timeout=self._stale_seconds)
                     except TimeoutError:
                         # Open but silent. A socket that looks healthy while
                         # serving nothing is worse than one that is closed.
@@ -311,9 +309,7 @@ class BinanceStreamClient:
                             "binance stream stale; forcing reconnect",
                             extra={"stale_seconds": self._stale_seconds},
                         )
-                        self.stats.last_error = (
-                            f"stale: no message for {self._stale_seconds}s"
-                        )
+                        self.stats.last_error = f"stale: no message for {self._stale_seconds}s"
                         break
 
                     self.stats.messages_received += 1

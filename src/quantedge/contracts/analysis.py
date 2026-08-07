@@ -174,6 +174,58 @@ class FeatureSnapshot(_Model):
     missing_features: list[str] = Field(default_factory=list)
 
 
+class StructureEvent(_Model):
+    """A single structural event: a break, a character change or a sweep.
+
+    ``direction`` is always the *implied directional bias* the event carries,
+    never merely which side of the chart it happened on. A sweep of highs takes
+    liquidity above the market and is then rejected, so its bias is ``DOWN``.
+    Encoding it the other way round would make an event's direction mean two
+    different things depending on ``event_type``.
+
+    ``level_confirmed_at_index`` exists to make the no-lookahead property
+    auditable from the output alone: it must always be strictly less than
+    ``occurred_at_index``, i.e. the level was knowable before the bar that acted
+    on it. A consumer can assert this without re-reading the candles.
+
+    ``confidence`` is a transparent rule-based weight in ``[0, 1]`` derived from
+    displacement, level maturity and trend agreement. It is **not** a calibrated
+    probability, not an accuracy figure and not a win rate.
+    """
+
+    event_type: Literal["BOS", "CHOCH", "LIQUIDITY_SWEEP"]
+    direction: SignalDirection
+    level: Decimal = Field(description="The swing price that was broken or swept")
+    price: Decimal = Field(description="Close that broke it, or extreme that swept it")
+    occurred_at_index: int = Field(ge=0)
+    occurred_at_utc: datetime
+    level_index: int = Field(ge=0, description="Bar index of the swing forming the level")
+    level_confirmed_at_index: int = Field(ge=0)
+    confidence: float = Field(ge=0.0, le=1.0)
+    evidence: list[str] = Field(default_factory=list)
+    invalidation: str
+
+
+class LiquidityPool(_Model):
+    """Two or more confirmed swings resting at effectively the same price.
+
+    Equal highs and equal lows are where stop orders accumulate. The cluster is
+    reported with the tolerance that produced it, because "equal" is a
+    volatility-relative judgement -- two highs 3 ticks apart are equal on an
+    index future and are not on a low-priced altcoin.
+    """
+
+    kind: Literal["EQUAL_HIGHS", "EQUAL_LOWS"]
+    price: Decimal = Field(description="Mean price of the cluster members")
+    touches: int = Field(ge=2)
+    indices: list[int] = Field(default_factory=list)
+    confirmed_at_index: int = Field(ge=0)
+    tolerance_used: Decimal
+    swept: bool = Field(
+        default=False, description="A later bar's extreme cleared the pool by the tolerance"
+    )
+
+
 class StructureReport(_Model):
     """Price-structure analysis from confirmed swings only.
 
@@ -196,6 +248,40 @@ class StructureReport(_Model):
     nearest_resistance: Decimal | None = None
     nearest_support: Decimal | None = None
     notes: list[str] = Field(default_factory=list)
+
+    # -- structural events and liquidity ------------------------------------ #
+    events: list[StructureEvent] = Field(
+        default_factory=list, description="BOS / CHOCH / sweep events, oldest first"
+    )
+    last_bos: StructureEvent | None = None
+    last_choch: StructureEvent | None = None
+    equal_highs: list[LiquidityPool] = Field(default_factory=list)
+    equal_lows: list[LiquidityPool] = Field(default_factory=list)
+
+    # -- internal vs external structure ------------------------------------- #
+    # Two swing scales. External is the structure a higher timeframe would see;
+    # internal is the detail inside the current external leg. They disagree
+    # constantly, and that disagreement is information (a pullback in a trend),
+    # not noise to be averaged away -- so both are reported.
+    internal_structure: Literal["UPTREND", "DOWNTREND", "RANGE", "UNCLEAR"] = "UNCLEAR"
+    external_structure: Literal["UPTREND", "DOWNTREND", "RANGE", "UNCLEAR"] = "UNCLEAR"
+
+    # -- position within the last external range ---------------------------- #
+    premium_discount: Literal["PREMIUM", "DISCOUNT", "EQUILIBRIUM"] | None = None
+    range_position: float | None = Field(
+        default=None,
+        description="Close as a fraction of the last external swing range. "
+        "Deliberately unbounded: <0 or >1 means price has left that range, "
+        "which is a real and important state that clamping would erase.",
+    )
+
+    structure_confidence: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+        description="Rule-based agreement score across swing count, internal/external "
+        "consistency and recent events. Not a probability.",
+    )
 
 
 class TimeframeView(_Model):

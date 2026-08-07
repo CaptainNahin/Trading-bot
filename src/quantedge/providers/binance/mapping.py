@@ -154,9 +154,7 @@ def normalize_kline(
     )
 
 
-def normalize_ticker(
-    raw: dict[str, Any], *, book: dict[str, Any] | None = None
-) -> Quote:
+def normalize_ticker(raw: dict[str, Any], *, book: dict[str, Any] | None = None) -> Quote:
     """Normalize ``/api/v3/ticker/24hr``, optionally enriched with bookTicker.
 
     ``/api/v3/ticker/24hr`` carries no bid/ask, so ``spread`` stays ``None``
@@ -253,9 +251,7 @@ def normalize_kline_event(payload: dict[str, Any]) -> Candle:
         raise ProviderBadResponseError(PROVIDER, "kline event missing 'k' object")
 
     interval = str(kline.get("i", ""))
-    timeframe = next(
-        (tf for tf, native in BINANCE_INTERVALS.items() if native == interval), None
-    )
+    timeframe = next((tf for tf, native in BINANCE_INTERVALS.items() if native == interval), None)
     if timeframe is None:
         raise ProviderBadResponseError(PROVIDER, f"unknown kline interval '{interval}'")
 

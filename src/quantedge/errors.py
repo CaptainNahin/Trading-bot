@@ -22,6 +22,7 @@ from typing import Any
 from quantedge.logging import redact
 
 __all__ = [
+    "AllProvidersFailedError",
     "CircuitOpenError",
     "ConfigurationError",
     "DataQualityError",
@@ -59,6 +60,7 @@ class ErrorCode:
     PROVIDER_TIMEOUT = "PROVIDER_TIMEOUT"
     PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
     PROVIDER_BAD_RESPONSE = "PROVIDER_BAD_RESPONSE"
+    ALL_PROVIDERS_FAILED = "ALL_PROVIDERS_FAILED"
     CIRCUIT_OPEN = "CIRCUIT_OPEN"
     INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
     DATA_QUALITY_FAILED = "DATA_QUALITY_FAILED"
@@ -270,6 +272,49 @@ class ProviderBadResponseError(ProviderError):
         if sample:
             details["sample"] = sample[:200]
         super().__init__(message, details=details, retryable=False, provider=provider)
+
+
+class AllProvidersFailedError(ProviderError):
+    """Every provider in a routing chain was skipped or failed.
+
+    Distinct from :class:`ProviderUnavailableError`, which reports that *one*
+    vendor is down and another may still answer. This says there is no path to
+    the data at all, so the caller must surface ``INSUFFICIENT_DATA`` rather
+    than an empty result: "nobody could answer" and "the answer is nothing" are
+    different claims, and only one of them is safe to act on.
+
+    The per-provider attempt log is kept as the structured :attr:`attempts`
+    attribute. ``details`` values are flattened to redacted strings for the
+    client-facing payload, which would destroy a nested list.
+    """
+
+    code = ErrorCode.ALL_PROVIDERS_FAILED
+    http_status = 503
+
+    def __init__(
+        self,
+        chain: list[str],
+        message: str,
+        *,
+        attempts: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.attempts = [dict(a) for a in (attempts or [])]
+        self.chain = list(chain)
+        summary = (
+            "; ".join(
+                f"{a.get('provider')}: {a.get('outcome')} ({a.get('reason')})"
+                for a in self.attempts
+            )
+            or "none attempted"
+        )
+        # A chain skipped entirely for missing credentials will be skipped again
+        # a second later; one that timed out may well succeed. Only the latter
+        # should drive worker retries.
+        super().__init__(
+            message,
+            details={"chain": ", ".join(chain) or "empty", "attempts": summary},
+            retryable=any(a.get("outcome") == "failed" for a in self.attempts),
+        )
 
 
 class CircuitOpenError(ProviderError):

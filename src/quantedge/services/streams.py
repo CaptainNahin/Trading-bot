@@ -233,7 +233,7 @@ class MarketStreamCollector:
                     )
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             log.error("collector loop terminated", extra={"error": type(exc).__name__})
             raise
 

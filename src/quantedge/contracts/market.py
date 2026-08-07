@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated, Any, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
@@ -84,6 +84,14 @@ class SymbolInfo(_Base):
     tick_size: Decimal | None = None
     min_quantity: Decimal | None = None
     price_precision: int | None = None
+    exchange: str | None = Field(
+        default=None,
+        description="Listing venue, where the provider reports one (e.g. NASDAQ). "
+        "Absent for OTC markets such as spot forex.",
+    )
+    description: str | None = Field(
+        default=None, description="Human-readable instrument name, e.g. 'Apple Inc'"
+    )
     is_tradable: bool = True
     retrieved_at_utc: datetime = Field(default_factory=utc_now)
 
@@ -261,6 +269,12 @@ class Quote(_Base):
     spread: Decimal | None = None
     volume_24h: Decimal | None = None
     change_24h_percent: Decimal | None = None
+    is_market_open: bool | None = Field(
+        default=None,
+        description="Whether the venue reports the market as open. ``None`` means the "
+        "provider did not say -- which is not the same as closed, and must not be "
+        "rendered as one.",
+    )
     provider_time_utc: datetime
     received_at_utc: datetime = Field(default_factory=utc_now)
 

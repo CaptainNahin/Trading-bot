@@ -57,15 +57,11 @@ async def main() -> None:
             if asyncio.get_event_loop().time() - start > 10.0:
                 break
 
-    print(
-        f"   OK: Received {kline_count} kline events and {book_count} book_ticker events\n"
-    )
+    print(f"   OK: Received {kline_count} kline events and {book_count} book_ticker events\n")
 
     # 2. Collector: warm up and verify cache
     print("2. Collector warm-up (15 seconds)...")
-    collector = MarketStreamCollector(
-        symbols=symbols, intervals=intervals, persistence=None
-    )
+    collector = MarketStreamCollector(symbols=symbols, intervals=intervals, persistence=None)
     await collector.start()
     await asyncio.sleep(15.0)
     # Capture health while it is still running -- stopping first would report
@@ -119,9 +115,7 @@ async def main() -> None:
     if health.status.value == "ok":
         print("\n[PASS] WebSocket collector is functional.")
     elif health.status.value == "degraded":
-        print(
-            f"\n[WARN] Collector is degraded: {health.to_dict()['message']} (may be warming up)"
-        )
+        print(f"\n[WARN] Collector is degraded: {health.to_dict()['message']} (may be warming up)")
     else:
         print(f"\n[FAIL] Collector unhealthy: {health.to_dict()['message']}")
 
