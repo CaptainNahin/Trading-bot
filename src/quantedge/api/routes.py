@@ -367,3 +367,15 @@ def debug_db():
     except Exception as e:
         import traceback
         return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+@router.get("/debug-db")
+def debug_db():
+    try:
+        from quantedge.repositories.database import get_engine
+        from sqlalchemy import text
+        engine = get_engine()
+        with engine.connect() as conn:
+            res = conn.execute(text("SELECT 1")).scalar()
+            return {"status": "ok", "result": res}
+    except Exception as e:
+        import traceback
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
