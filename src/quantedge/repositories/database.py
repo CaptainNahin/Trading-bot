@@ -101,7 +101,9 @@ def make_engine(url: str | None = None, *, echo: bool = False) -> Engine:
     """
     dsn = url or get_settings().resolved_database_url
     if dsn and dsn.startswith("postgresql+psycopg://"):
-        dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
+        dsn = dsn.replace("postgresql+psycopg://", "postgresql+psycopg2://", 1)
+    elif dsn and dsn.startswith("postgresql://"):
+        dsn = dsn.replace("postgresql://", "postgresql+psycopg2://", 1)
         
     parsed = make_url(dsn)
     is_sqlite = parsed.get_backend_name() == "sqlite"
