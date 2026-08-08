@@ -220,12 +220,28 @@ class AgentRouterLLMProvider(BaseLLMProvider):
             ) from exc
 
         # Extract text content from the response
-        text_parts = [
-            block.text
-            for block in response.content
-            if hasattr(block, "text")
-        ]
-        text = "".join(text_parts)
+        if isinstance(response, str):
+            text = response
+        elif isinstance(response, dict):
+            # If the response is a dictionary, extract the text content from the message
+            content = response.get("content", [])
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text_parts = [
+                    block.get("text", "") if isinstance(block, dict) else getattr(block, "text", "")
+                    for block in content
+                ]
+                text = "".join(text_parts)
+            else:
+                text = str(response)
+        else:
+            text_parts = [
+                block.text
+                for block in getattr(response, "content", [])
+                if hasattr(block, "text")
+            ]
+            text = "".join(text_parts)
 
         if not text.strip():
             raise ProviderBadResponseError(

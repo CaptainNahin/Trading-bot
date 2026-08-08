@@ -23,6 +23,7 @@ from quantedge.contracts import (
     TradeRecommendation,
 )
 from quantedge.errors import QuantEdgeError, ValidationError
+from quantedge import config
 from quantedge.providers.registry import get_registry
 from quantedge.services import (
     chat as bot_chat,
