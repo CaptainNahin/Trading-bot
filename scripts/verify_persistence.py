@@ -87,7 +87,7 @@ def section_schema(engine: object) -> None:
 
     print("\n[1] Schema creation")
     names = create_all(engine)  # type: ignore[arg-type]
-    check("15 tables created", len(names) == 15, f"got {len(names)}")
+    check("16 tables created", len(names) == 16, f"got {len(names)}")
     for required in ("candles", "settled_signals", "audit_logs", "provider_quota"):
         check(f"table '{required}' exists", required in names)
 

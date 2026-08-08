@@ -112,6 +112,26 @@ def redact(text: Any) -> str:
     return out
 
 
+def _redact_arg(value: Any) -> Any:
+    """Scrub one log argument without destroying its type.
+
+    Redacting unconditionally returned a ``str`` for every argument, which broke
+    every printf-style call using a numeric placeholder: ``"%d" % ("3",)`` raises,
+    the record can no longer render, and :class:`JsonFormatter` falls back to the
+    raw template -- so ``"Scan completed: %d candidates"`` reached the operator
+    with the count silently missing. The line looked fine; the number was gone.
+
+    Redaction strength is unchanged. When scrubbing alters the text, the scrubbed
+    string is returned exactly as before. When it does not, the original object is
+    passed through and the formatter renders the same characters from it. Numbers
+    are exempt outright: they have no string form a secret can hide in.
+    """
+    if value is None or isinstance(value, bool | int | float | complex):
+        return value
+    scrubbed = redact(value)
+    return scrubbed if scrubbed != str(value) else value
+
+
 class RedactingFilter(logging.Filter):
     """Scrub secrets from the message, its args, and any attached exception."""
 
@@ -121,9 +141,9 @@ class RedactingFilter(logging.Filter):
 
         if record.args:
             if isinstance(record.args, dict):
-                record.args = {k: redact(v) for k, v in record.args.items()}
+                record.args = {k: _redact_arg(v) for k, v in record.args.items()}
             elif isinstance(record.args, tuple):
-                record.args = tuple(redact(a) for a in record.args)
+                record.args = tuple(_redact_arg(a) for a in record.args)
 
         # Exception text is the highest-risk path: render it now, scrub it, and
         # drop the original exc_info so the formatter cannot re-expand it.
@@ -172,11 +192,15 @@ class JsonFormatter(logging.Formatter):
     """Emit one JSON object per record (machine-ingestible logs)."""
 
     def format(self, record: logging.LogRecord) -> str:
+        try:
+            msg = record.getMessage()
+        except Exception:
+            msg = str(record.msg)
         payload: dict[str, Any] = {
             "ts": datetime.fromtimestamp(record.created, tz=UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
-            "message": record.getMessage(),
+            "message": msg,
         }
         for key, value in record.__dict__.items():
             if key not in _RESERVED and not key.startswith("_"):

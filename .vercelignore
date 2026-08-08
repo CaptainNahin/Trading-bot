@@ -1,0 +1,10 @@
+.venv
+.git
+.mypy_cache
+.ruff_cache
+data/
+*.db
+*.sqlite
+__pycache__
+node_modules
+C:\Users

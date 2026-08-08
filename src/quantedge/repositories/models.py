@@ -64,6 +64,7 @@ __all__ = [
     "SignalRow",
     "StructureReportRow",
     "Symbol",
+    "TradeMemoryRow",
 ]
 
 # Prices need exact decimal arithmetic; 24 digits with 12 after the point covers
@@ -524,6 +525,36 @@ class AuditLog(_Row):
     details: Mapped[dict[str, Any] | None] = mapped_column(JSON)
 
 
+class TradeMemoryRow(_Row):
+    """A stored post-mortem memory for a completed trade.
+
+    Contains root-cause analysis, key lessons, DO rules, and DONT rules derived
+    from trade execution outcomes to prevent repeating past failure patterns.
+    """
+
+    __tablename__ = "trade_memories"
+    __table_args__ = (
+        Index("ix_trade_memories_symbol_regime", "symbol", "regime"),
+        Index("ix_trade_memories_outcome", "outcome"),
+    )
+
+    memory_id: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    signal_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(64), nullable=False)
+    asset_class: Mapped[str] = mapped_column(String(32), nullable=False, default="crypto")
+    horizon: Mapped[str] = mapped_column(String(16), nullable=False, default="swing")
+    regime: Mapped[str] = mapped_column(String(32), nullable=False, default="UNCERTAIN")
+    pattern: Mapped[str] = mapped_column(String(64), nullable=False, default="general")
+    outcome: Mapped[str] = mapped_column(String(32), nullable=False)
+    reference_price: Mapped[Decimal | None] = mapped_column(_PRICE)
+    exit_price: Mapped[Decimal | None] = mapped_column(_PRICE)
+    root_cause: Mapped[str] = mapped_column(Text, nullable=False)
+    key_lessons: Mapped[list[Any] | None] = mapped_column(JSON)
+    do_rules: Mapped[list[Any] | None] = mapped_column(JSON)
+    dont_rules: Mapped[list[Any] | None] = mapped_column(JSON)
+    user_notes: Mapped[str | None] = mapped_column(Text)
+
+
 TABLE_NAMES = [
     "symbols",
     "candles",
@@ -540,4 +571,5 @@ TABLE_NAMES = [
     "signals",
     "settled_signals",
     "audit_logs",
+    "trade_memories",
 ]

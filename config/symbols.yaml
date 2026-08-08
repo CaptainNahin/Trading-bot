@@ -29,7 +29,11 @@ crypto:
     - DOGEUSDT
     - AVAXUSDT
     - LINKUSDT
-    - MATICUSDT
+    # POL, not MATIC: Polygon migrated the token and MATICUSDT stopped trading
+    # on 2024-09-10. Binance still serves its historical klines, so the pair
+    # looked alive to a naive fetch and only the freshness check caught it --
+    # every scan of it was rejected as ~700 days stale.
+    - POLUSDT
     - LTCUSDT
     - DOTUSDT
 

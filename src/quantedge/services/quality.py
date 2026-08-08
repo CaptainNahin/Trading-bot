@@ -40,6 +40,7 @@ from quantedge.contracts import (
     CandleSeries,
     DataQualityReport,
     QualityStatus,
+    Timeframe,
     timeframe_seconds,
     utc_now,
 )
@@ -48,12 +49,13 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from datetime import datetime
 
-    from quantedge.contracts import Candle, Quote, Timeframe
+    from quantedge.contracts import Candle, Quote
 
 __all__ = [
     "CHECK_NAMES",
     "QUALITY_VERSION",
     "assess_quality",
+    "evaluate_quality",
 ]
 
 QUALITY_VERSION = "quality-1.0.0"
@@ -551,4 +553,60 @@ def assess_quality(
         blocking_reasons=blocking,
         checks_run=[o.name for o in outcomes],
         checked_at_utc=now,
+    )
+
+
+def evaluate_quality(
+    series: CandleSeries | Sequence[Candle],
+    *,
+    quote: Quote | None = None,
+    min_bars: int = 0,
+    expected_timeframe: Timeframe | str | None = None,
+    provider: str | None = None,
+    now: datetime | None = None,
+) -> DataQualityReport:
+    """Run the fifteen checks, then confirm the bars are the ones asked for.
+
+    ``assess_quality`` scores a series against itself: it can tell that every
+    bar shares one timeframe, not that the timeframe is the one the caller
+    requested. Those are different claims, and the gap between them is a real
+    provider failure mode -- a vendor that silently serves 5m bars for a 15m
+    request produces a series that is internally perfect and still wrong. The
+    indicators computed on it would carry a 15m label, so the mismatch has to
+    block rather than warn.
+
+    ``expected_timeframe`` and ``provider`` were previously accepted and
+    discarded, which meant eight call sites were asking for a guarantee that
+    was never checked.
+    """
+    report = assess_quality(series, quote=quote, min_bars=min_bars, now=now)
+
+    mismatches: list[str] = []
+
+    if expected_timeframe is not None and report.timeframe is not None:
+        wanted = (
+            expected_timeframe.value
+            if isinstance(expected_timeframe, Timeframe)
+            else str(expected_timeframe)
+        )
+        if report.timeframe.value != wanted:
+            mismatches.append(
+                f"provider served {report.timeframe.value} bars for a {wanted} request"
+            )
+
+    # A provider mismatch is reported, not corrected. The report's provider comes
+    # from the candles themselves, so it is the truthful one; overwriting it with
+    # the caller's expectation would hide exactly the substitution worth seeing.
+    if provider is not None and report.provider not in (provider, "unknown"):
+        mismatches.append(f"bars came from {report.provider}, not the requested {provider}")
+
+    if not mismatches:
+        return report
+
+    return report.model_copy(
+        update={
+            "status": QualityStatus.FAIL,
+            "blocking_reasons": [*report.blocking_reasons, *mismatches],
+            "quality_score": 0.0,
+        }
     )

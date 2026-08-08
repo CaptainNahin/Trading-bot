@@ -363,9 +363,7 @@ class ResilientHttpClient:
         self._inflight: dict[str, asyncio.Task[Any]] = {}
         self._lock = asyncio.Lock()
 
-    def _resolve_quota_store(
-        self, override: QuotaStore | None
-    ) -> tuple[QuotaStore | None, bool]:
+    def _resolve_quota_store(self, override: QuotaStore | None) -> tuple[QuotaStore | None, bool]:
         """Find the store backing the daily cap, and say whether it is durable.
 
         Only wired when this provider actually has a daily cap: Binance has none,

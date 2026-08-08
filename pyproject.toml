@@ -21,7 +21,9 @@ dependencies = [
     "pyyaml>=6.0.2",
     "python-dotenv>=1.0.1",
     "tenacity>=9.0.0",
+    "anthropic>=0.40.0",
 ]
+
 
 [project.optional-dependencies]
 postgres = [
@@ -102,10 +104,44 @@ ignore = [
 # memory.py borrows _window_start from sql.py the same way. See get_repository.
 "src/quantedge/repositories/__init__.py" = ["PLC0415"]
 "src/quantedge/repositories/memory.py" = ["PLC0415"]
+# The chat/signal/scanner trio import each other inside functions to break a
+# genuine cycle: chat calls signal, signal calls scanner, and both reach back
+# into memory for past outcomes. Hoisting any of these to module scope makes
+# the package unimportable. The LLM adapters do the same for their optional
+# transport so a missing client library disables one provider rather than the
+# whole registry.
+"src/quantedge/services/signal.py" = ["PLC0415"]
+"src/quantedge/services/scanner.py" = ["PLC0415"]
+"src/quantedge/api/routes.py" = ["PLC0415"]
+"src/quantedge/providers/llm/*.py" = ["PLC0415", "S105"]
 # Diagnostic smoke scripts: they deliberately probe private helpers to prove a
 # parser rejects bad input, and they catch broadly so one failed section still
 # reports the rest. They are operator tools, not shipped library code.
 "scripts/**" = ["BLE001", "SLF001", "S105", "S311", "T201", "PLC0415"]
+# A background worker loop must survive anything one iteration throws, including
+# a provider client raising something outside our hierarchy. Narrowing this to
+# QuantEdgeError would let an unexpected exception kill a daemon that is supposed
+# to keep running; the exception is logged, not swallowed silently. Each site
+# carries its own `noqa` rather than a blanket ignore here, so a blind except
+# added to worker code for some *other* reason still has to justify itself.
+# Console entrypoints defer their heavy imports into main() so `--help` and an
+# import-time config error do not first drag in uvicorn, SQLAlchemy and the
+# whole provider stack.
+"src/quantedge/**/__main__.py" = ["PLC0415"]
+# The log formatter is the one place that cannot raise: record.getMessage() fails
+# on a bad format string, and letting that propagate would lose the log line that
+# was being written to report some other problem.
+"src/quantedge/logging.py" = ["BLE001"]
+# Intent is `str, Enum` rather than StrEnum because it is matched against raw
+# request strings and serialised into JSON responses; UP042's suggested StrEnum
+# is 3.11+ only and target-version here is py311, so the rewrite buys nothing.
+"src/quantedge/services/chat.py" = ["PLC0415", "UP042"]
+# Analysis builders assembling one dataclass from many independently-computed
+# indicator values. Every argument is passed by keyword at the call sites; the
+# count reflects how many indicators a report carries, not an unclear signature.
+"src/quantedge/services/mtf.py" = ["PLC0415", "PLR0917"]
+"src/quantedge/services/risk.py" = ["PLR0917"]
+"src/quantedge/services/structure.py" = ["PLR0917"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["quantedge"]

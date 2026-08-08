@@ -32,7 +32,9 @@ value changed.
 
 from __future__ import annotations
 
-from datetime import datetime
+import contextlib
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import delete, event, func, select
@@ -41,11 +43,13 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 
 from quantedge.contracts import (
+    AIDecision,
     AssetClass,
     Candle,
     DataQualityReport,
     EconomicEvent,
     FeatureSnapshot,
+    MarketRegime,
     NewsItem,
     ProviderHealth,
     Quote,
@@ -53,9 +57,11 @@ from quantedge.contracts import (
     SettledSignal,
     SettlementOutcome,
     SignalDirection,
+    SignalStatus,
     StructureReport,
     SymbolInfo,
     Timeframe,
+    TradeMemory,
     utc_now,
 )
 from quantedge.errors import PersistenceError
@@ -73,6 +79,22 @@ __all__ = ["SqlRepository", "install_immutability_guards"]
 log = get_logger(__name__)
 
 _IMMUTABLE = (m.SettledSignalRow, m.AuditLog)
+
+
+def _parse_utc(raw: str) -> datetime | None:
+    """Parse a stored ISO timestamp, or ``None`` when it cannot be read.
+
+    JSON columns round-trip datetimes as strings, and SQLite gives them back
+    without the tzinfo Postgres preserves. A naive result is assumed UTC because
+    every write in this schema goes through :func:`utc_now`; anything
+    unparseable returns ``None`` so the caller skips the row rather than
+    settling against a timestamp it had to guess.
+    """
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 def _window_start(stamp: datetime, kind: str) -> datetime:
@@ -895,6 +917,55 @@ class SqlRepository:
                 details={"signal_id": settled.signal_id},
             ) from exc
 
+    def unsettled_expired_signals(self, *, limit: int = 100) -> list[AIDecision]:
+        """Signals whose expiry has passed and which have no settlement row yet.
+
+        The anti-join against ``settled_signals`` is what keeps the settlement
+        worker idempotent: a signal already scored is not a candidate, so a
+        restarted worker cannot re-score a closed trade.
+
+        A row whose stored JSON has no ``expiry_utc`` is skipped rather than
+        assigned one. Settling against an invented expiry would score the trade
+        over a window the signal never specified.
+        """
+        settled = select(m.SettledSignalRow.signal_id)
+        stmt = (
+            select(m.SignalRow)
+            .where(m.SignalRow.signal_id.not_in(settled))
+            .order_by(m.SignalRow.signal_time_utc.asc())
+            .limit(max(1, limit))
+        )
+        with session_scope(self._factory) as session:
+            rows = list(session.scalars(stmt))
+
+        now = utc_now()
+        due: list[AIDecision] = []
+        for row in rows:
+            payload = row.llm_response or {}
+            expiry = payload.get("expiry_utc")
+            if not expiry:
+                continue
+            parsed = expiry if isinstance(expiry, datetime) else _parse_utc(str(expiry))
+            if parsed is None or parsed > now:
+                continue
+            raw_price = payload.get("reference_price")
+            price: Decimal | None = None
+            if raw_price is not None:
+                with contextlib.suppress(InvalidOperation, ValueError):
+                    price = Decimal(str(raw_price))
+            due.append(
+                AIDecision(
+                    decision_id=row.signal_id,
+                    symbol=row.symbol,
+                    horizon=row.horizon,
+                    status=SignalStatus.SIGNAL,
+                    direction=SignalDirection(row.direction),
+                    reference_price=price,
+                    expiry_utc=parsed,
+                )
+            )
+        return due
+
     def settled_signals(
         self, *, symbol: str | None = None, horizon: str | None = None, limit: int = 100
     ) -> list[SettledSignal]:
@@ -960,6 +1031,61 @@ class SqlRepository:
                 for r in session.scalars(stmt)
             ]
 
+    def save_trade_memory(self, memory: TradeMemory) -> None:
+        """Persist one post-mortem trade memory."""
+        with session_scope(self._factory) as session:
+            session.add(
+                m.TradeMemoryRow(
+                    created_at_utc=utc_now(),
+                    memory_id=memory.memory_id,
+                    signal_id=memory.signal_id,
+                    symbol=memory.symbol,
+                    asset_class=memory.asset_class.value
+                    if hasattr(memory.asset_class, "value")
+                    else str(memory.asset_class),
+                    horizon=memory.horizon,
+                    regime=memory.regime.value
+                    if hasattr(memory.regime, "value")
+                    else str(memory.regime),
+                    pattern=memory.pattern,
+                    outcome=memory.outcome.value
+                    if hasattr(memory.outcome, "value")
+                    else str(memory.outcome),
+                    reference_price=memory.reference_price,
+                    exit_price=memory.exit_price,
+                    root_cause=memory.root_cause,
+                    key_lessons=list(memory.key_lessons),
+                    do_rules=list(memory.do_rules),
+                    dont_rules=list(memory.dont_rules),
+                    user_notes=memory.user_notes,
+                )
+            )
+
+    def list_trade_memories(
+        self,
+        *,
+        symbol: str | None = None,
+        regime: str | None = None,
+        outcome: str | None = None,
+        limit: int = 100,
+    ) -> list[TradeMemory]:
+        """Query trade memories by symbol, regime, or outcome."""
+        stmt = (
+            select(m.TradeMemoryRow)
+            .order_by(m.TradeMemoryRow.created_at_utc.desc())
+            .limit(max(1, limit))
+        )
+        if symbol:
+            stmt = stmt.where(m.TradeMemoryRow.symbol == symbol)
+        if regime:
+            stmt = stmt.where(m.TradeMemoryRow.regime == regime)
+        if outcome:
+            stmt = stmt.where(m.TradeMemoryRow.outcome == outcome)
+
+        with session_scope(self._factory) as session:
+            rows = list(session.scalars(stmt))
+        return [_memory_from_row(r) for r in rows]
+
 
 def _event_from_row(row: m.EconomicEventRow) -> EconomicEvent:
     return EconomicEvent(
@@ -1003,4 +1129,25 @@ def _settled_from_row(row: m.SettledSignalRow) -> SettledSignal:
         settled_at_utc=row.settled_at_utc,
         settlement_provider=row.settlement_provider,
         notes=row.notes.split("\n") if row.notes else [],
+    )
+
+
+def _memory_from_row(row: m.TradeMemoryRow) -> TradeMemory:
+    return TradeMemory(
+        memory_id=row.memory_id,
+        signal_id=row.signal_id,
+        symbol=row.symbol,
+        asset_class=AssetClass(row.asset_class) if row.asset_class else AssetClass.CRYPTO,
+        horizon=row.horizon,
+        regime=MarketRegime(row.regime) if row.regime else MarketRegime.UNCERTAIN,
+        pattern=row.pattern,
+        outcome=SettlementOutcome(row.outcome),
+        reference_price=row.reference_price,
+        exit_price=row.exit_price,
+        root_cause=row.root_cause,
+        key_lessons=row.key_lessons or [],
+        do_rules=row.do_rules or [],
+        dont_rules=row.dont_rules or [],
+        user_notes=row.user_notes,
+        created_at_utc=row.created_at_utc,
     )

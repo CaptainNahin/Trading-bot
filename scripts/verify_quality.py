@@ -446,9 +446,7 @@ def section_quote_checks() -> None:
             provider_time_utc=NOW,
         )
     except ValueError as exc:
-        check(
-            "the Quote contract rejects a crossed book", "crossed market" in str(exc), str(exc)
-        )
+        check("the Quote contract rejects a crossed book", "crossed market" in str(exc), str(exc))
     else:
         check("the Quote contract rejects a crossed book", False, "no exception raised")
 

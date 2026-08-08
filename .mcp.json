@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "quantedge-live-gateway": {
+      "command": "D:\\trading bot\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "quantedge.mcp_server"
+      ],
+      "env": {
+        "PYTHONPATH": "D:\\trading bot\\src"
+      }
+    }
+  }
+}

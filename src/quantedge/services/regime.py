@@ -293,6 +293,19 @@ def classify_regime(
                 )
                 score = 0.50
 
+        elif bb_width_percentile is None:
+            # No volatility percentile exists yet -- too little width history to
+            # rank against. Reported as its own case rather than folded into
+            # "middling": one is a measurement, the other is its absence, and
+            # formatting the missing value here used to raise TypeError.
+            regime = MarketRegime.UNCERTAIN
+            score = 0.30
+            contradictions.append(
+                f"ADX {adx:.1f} is low but no Bollinger width percentile is available to "
+                f"separate a quiet range from a compressed one; structure is "
+                f"{structure.structure}"
+            )
+
         else:
             # ADX says range, but BB width is middling and structure might disagree.
             regime = MarketRegime.UNCERTAIN

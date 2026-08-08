@@ -34,8 +34,18 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING, Any, TypeVar
 
+from quantedge.asyncbridge import run_sync
 from quantedge.config import providers_config
-from quantedge.contracts import AssetClass, HealthStatus, ProviderHealth
+from quantedge.contracts import (
+    AssetClass,
+    CandleSeries,
+    HealthStatus,
+    OrderBook,
+    ProviderHealth,
+    Quote,
+    Timeframe,
+    Trade,
+)
 from quantedge.errors import (
     AllProvidersFailedError,
     ConfigurationError,
@@ -361,6 +371,107 @@ class ProviderRegistry:
             credentials_present=False,
             message=message,
         )
+
+    def health_check_all(self) -> list[ProviderHealth]:
+        """Synchronous wrapper for health across all providers."""
+        return run_sync(self.health())
+
+    def get_quote(self, symbol: str, provider_name: str = "binance") -> Quote:
+        """Fetch one quote synchronously, with fallback across the chain.
+
+        Routed through :meth:`market_data` rather than pinned to a single
+        provider, so a vendor outage falls over instead of returning ``None``.
+        A ``None`` return would have been indistinguishable from "this symbol
+        has no price", which is a different and much stronger claim.
+        """
+
+        async def fetch() -> Quote:
+            quote, _, _ = await self.market_data(
+                self._asset_class_for(symbol),
+                lambda p: p.get_quote(symbol),
+                description=f"quote for {symbol}",
+                capability="quote",
+            )
+            return quote
+
+        return run_sync(fetch())
+
+    def get_candles(
+        self,
+        symbol: str,
+        timeframe: Any,
+        limit: int = 100,
+        provider_name: str | None = None,
+    ) -> CandleSeries:
+        """Fetch a candle series synchronously.
+
+        Returns the :class:`CandleSeries`, not a bare list: the series carries
+        the provider, symbol, timeframe and forming-bar flag that the quality
+        engine needs to do its job. Handing back a list would strip exactly the
+        metadata the Rule 9 and single-provider checks are built on.
+
+        ``provider_name`` pins one vendor when supplied; otherwise the routing
+        chain for the symbol's asset class is used with normal fallback.
+        """
+        tf = timeframe if isinstance(timeframe, Timeframe) else Timeframe(str(timeframe))
+
+        async def fetch() -> CandleSeries:
+            if provider_name is not None:
+                provider = self.get(provider_name)
+                return await provider.get_candles(symbol, tf, count=limit)  # type: ignore[attr-defined]
+            series, _, _ = await self.market_data(
+                self._asset_class_for(symbol),
+                lambda p: p.get_candles(symbol, tf, count=limit),
+                description=f"{limit} {tf.value} candles for {symbol}",
+                capability="candles",
+            )
+            return series
+
+        return run_sync(fetch())
+
+    def get_order_book(self, symbol: str, limit: int = 20) -> OrderBook:
+        """Fetch one L2 order book snapshot synchronously.
+
+        Only providers advertising the ``order_book`` capability are tried; a
+        vendor that cannot serve depth is skipped rather than asked and failed.
+        """
+
+        async def fetch() -> OrderBook:
+            book, _, _ = await self.market_data(
+                self._asset_class_for(symbol),
+                lambda p: p.get_order_book(symbol, depth=limit),
+                description=f"order book for {symbol}",
+                capability="order_book",
+            )
+            return book
+
+        return run_sync(fetch())
+
+    def get_recent_trades(self, symbol: str, limit: int = 100) -> list[Trade]:
+        """Fetch recent public trades synchronously."""
+
+        async def fetch() -> list[Trade]:
+            trades, _, _ = await self.market_data(
+                self._asset_class_for(symbol),
+                lambda p: p.get_recent_trades(symbol, limit=limit),
+                description=f"recent trades for {symbol}",
+                capability="recent_trades",
+            )
+            return trades
+
+        return run_sync(fetch())
+
+    @staticmethod
+    def _asset_class_for(symbol: str) -> AssetClass:
+        """Resolve a symbol's asset class from the symbol registry.
+
+        Consulted rather than inferred from the string: guessing "anything
+        ending USDT is crypto" would route a mislabelled forex pair to a crypto
+        exchange and report the resulting 400 as a missing symbol.
+        """
+        from quantedge.symbols import asset_class_for
+
+        return asset_class_for(symbol)
 
     async def aclose(self) -> None:
         """Close every constructed provider's HTTP client."""

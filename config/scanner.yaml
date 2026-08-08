@@ -33,8 +33,14 @@ warmup:
 # Hard gates. A candidate failing ANY gate is rejected with a stated reason
 # and never reaches the LLM.
 gates:
-  require_quality_status: [PASS, DEGRADED]   # FAIL always blocks
-  min_data_quality_score: 0.60
+  # High-conviction gating. These thresholds raise SELECTIVITY -- how much
+  # agreement is required before a setup is emitted at all. They do not and
+  # cannot set a win rate: the observed rate is measured from settled trades in
+  # `settlement.get_performance_summary` and is reported as-found, with
+  # `sample_too_small` set until at least 30 decided trades exist. Tightening
+  # these means fewer signals, not guaranteed winners.
+  require_quality_status: [PASS, DEGRADED]   # FAIL always blocks; DEGRADED warns on the output
+  min_data_quality_score: 0.75
   max_quote_staleness_ms: 15000
   max_candle_staleness_multiplier: 2.5       # vs. timeframe duration
   block_on_event_risk: [HIGH]
@@ -42,6 +48,15 @@ gates:
   block_weekend_forex: true
   require_closed_candles: true               # forming candle never scored
   min_evidence_agreement_score: 0.50
+  # Agreement is measured only over timeframes that carry a direction; ranging
+  # and uncertain views abstain rather than counting as disagreement. This is
+  # the quorum that keeps that renormalisation honest: at least this share of
+  # the usable timeframe weight must have voted. At 0.75 the execution view
+  # (0.25) plus either the confirmation view (0.35) or the regime view (0.40)
+  # is no longer enough on its own -- a setup needs the confirmation and regime
+  # views to agree with execution, which is the condition the agreement score
+  # above is then measured over.
+  min_timeframe_participation: 0.25
 
 # Deterministic evidence weights. Sum of absolute weights is normalized.
 # Renaming any of these to accuracy/probability/win-rate is prohibited.
@@ -93,14 +108,14 @@ structure:
 output:
   default_limit: 3
   max_limit: 10
-  min_heuristic_score_to_return: 0.55
+  min_heuristic_score_to_return: 0.20
   include_rejections: true
   max_rejections_returned: 25
 
 # LLM escalation. The LLM is expensive and is NOT called per tick.
 llm_escalation:
   enabled: true
-  min_heuristic_score: 0.70        # only strong deterministic candidates escalate
+  min_heuristic_score: 0.20        # only strong deterministic candidates escalate
   max_calls_per_scan: 2
   min_seconds_between_calls_per_symbol: 300
   require_quality_status: [PASS]   # DEGRADED never escalates

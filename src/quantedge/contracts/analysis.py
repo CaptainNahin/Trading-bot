@@ -310,6 +310,14 @@ class MultiTimeframeSnapshot(_Model):
     views: list[TimeframeView]
     aligned_direction: SignalDirection | None = None
     alignment_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    # Agreement among the views that actually carry a direction, and how much of
+    # the timeframe stack that was. They answer different questions and a caller
+    # needs both: one directional view out of three renormalises to a perfect
+    # 1.0 agreement, which is true and also nearly worthless on its own.
+    # ``participation`` is the fraction of non-failed weight that voted, so a
+    # gate can require both unanimity and a quorum.
+    participation: float = Field(default=0.0, ge=0.0, le=1.0)
+    abstaining_roles: list[str] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
 
@@ -444,11 +452,21 @@ class ScanRejection(_Model):
 
 
 class ScanResult(_Model):
+    """Outcome of one scan: what qualified, what did not, and on what data.
+
+    ``quality_reports`` carries the execution-timeframe
+    :class:`DataQualityReport` per symbol -- for rejected symbols too, since
+    "the data was too poor to judge" and "the setup was not there" are different
+    answers. Downstream callers report that verdict instead of inferring one
+    from the candidate's score.
+    """
+
     horizon: str
     requested_symbols: list[str] = Field(default_factory=list)
     scanned: int = 0
     candidates: list[ScanCandidate] = Field(default_factory=list)
     rejections: list[ScanRejection] = Field(default_factory=list)
+    quality_reports: dict[str, DataQualityReport] = Field(default_factory=dict)
     generated_at_utc: datetime = Field(default_factory=utc_now)
     scanner_version: str
     warnings: list[str] = Field(default_factory=list)
@@ -593,6 +611,66 @@ class PerformanceSummary(_Model):
         "Observed historical frequency on a finite sample. Not a calibrated "
         "probability and not predictive of future outcomes."
     )
+
+
+class TradeMemory(_Model):
+    """Post-mortem root-cause analysis record saved to memory."""
+
+    memory_id: str
+    signal_id: str
+    symbol: str
+    asset_class: AssetClass = AssetClass.CRYPTO
+    horizon: str = "swing"
+    regime: MarketRegime = MarketRegime.UNCERTAIN
+    pattern: str = "general"
+    outcome: SettlementOutcome
+    reference_price: Decimal | None = None
+    exit_price: Decimal | None = None
+    root_cause: str
+    key_lessons: list[str] = Field(default_factory=list)
+    do_rules: list[str] = Field(default_factory=list)
+    dont_rules: list[str] = Field(default_factory=list)
+    user_notes: str | None = None
+    created_at_utc: datetime = Field(default_factory=utc_now)
+
+
+class TradeRecommendation(_Model):
+    """Memory-augmented trade recommendation payload."""
+
+    recommendation_id: str
+    symbol: str
+    asset_class: AssetClass
+    horizon: str
+    direction: SignalDirection
+    valid_from_utc: datetime
+    valid_until_utc: datetime
+    reference_price: Decimal
+    stop_loss: Decimal
+    take_profit: Decimal
+    risk_reward_ratio: float
+    risk_level: str = "MODERATE_RISK"
+    recommended_venue: str = "Binance"
+    # The regime the classifier returned, carried as its own field so consumers
+    # do not have to parse it back out of ``rationale``. A settled trade is
+    # filed in memory under this value, and a wrong parse would file it under a
+    # regime it never traded in.
+    regime: str | None = None
+    memory_consulted_count: int = 0
+    key_lessons_applied: list[str] = Field(default_factory=list)
+    # DON'T rules carried forward from losses whose measured cause recurred on
+    # this symbol and horizon. Each is a statement about trades that already
+    # happened, so it qualifies the setup without claiming anything about how
+    # this one resolves; the count of prior occurrences travels with the text so
+    # a rule seen once is not presented as a pattern.
+    memory_rules_applied: list[str] = Field(default_factory=list)
+    heuristic_score: float = 0.75
+    rationale: str = ""
+    # Caveats that qualify the recommendation without withdrawing it: degraded
+    # data quality, unfavourable reward:risk. A setup can clear the bar to be
+    # emitted and still carry something the trader should know, and burying that
+    # in ``rationale`` prose leaves consumers parsing sentences to find it.
+    warnings: list[str] = Field(default_factory=list)
+    generated_at_utc: datetime = Field(default_factory=utc_now)
 
 
 # Resolve the forward reference used by TimeframeView.regime.

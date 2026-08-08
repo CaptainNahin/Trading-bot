@@ -73,7 +73,9 @@ __all__ = [
     "MTF_VERSION",
     "ROLES",
     "analyze_multi_timeframe",
+    "build_mtf_snapshot",
     "build_timeframe_view",
+    "get_horizon_timeframes",
     "resolve_horizon",
 ]
 
@@ -111,8 +113,16 @@ def resolve_horizon(horizon: str) -> dict[str, Any]:
         plausible triple -- would produce an analysis the configuration never
         sanctioned, on timeframes the caller did not choose.
     """
+    aliases = {
+        "scalp": "1m",
+        "intraday": "5m",
+        "swing": "15m",
+        "position": "1h",
+    }
+    resolved_name = aliases.get(horizon.lower(), horizon)
+
     horizons = get_scanner_config().get("horizons", {})
-    entry = horizons.get(horizon)
+    entry = horizons.get(resolved_name)
     if not entry:
         available = ", ".join(sorted(horizons)) or "none configured"
         raise InsufficientDataError(
@@ -124,6 +134,40 @@ def resolve_horizon(horizon: str) -> dict[str, Any]:
         "regime": Timeframe(entry["regime"]),
         "lookback": int(entry.get("lookback", 300)),
     }
+
+
+def get_horizon_timeframes(horizon: str) -> dict[str, Any]:
+    """Alias for resolve_horizon."""
+    return resolve_horizon(horizon)
+
+
+def build_mtf_snapshot(
+    symbol: str,
+    horizon: str,
+    exec_candles: Sequence[Candle] | CandleSeries,
+    conf_candles: Sequence[Candle] | CandleSeries,
+    reg_candles: Sequence[Candle] | CandleSeries,
+    exec_quality: Any = None,
+    conf_quality: Any = None,
+    reg_quality: Any = None,
+    exec_struct: Any = None,
+    conf_struct: Any = None,
+    reg_struct: Any = None,
+) -> MultiTimeframeSnapshot:
+    """Construct a MultiTimeframeSnapshot from series by role."""
+    series_by_role = {
+        "execution": exec_candles,
+        "confirmation": conf_candles,
+        "regime": reg_candles,
+    }
+    from quantedge.contracts import AssetClass
+
+    return analyze_multi_timeframe(
+        symbol=symbol,
+        asset_class=AssetClass.CRYPTO,
+        horizon=horizon,
+        series_by_role=series_by_role,
+    )
 
 
 def build_timeframe_view(
@@ -270,9 +314,7 @@ def analyze_multi_timeframe(
         if series is None:
             warnings.append(f"no {role} series supplied; that view is absent from the analysis")
             continue
-        view = build_timeframe_view(
-            role, series, min_bars=min_bars, now=now
-        )
+        view = build_timeframe_view(role, series, min_bars=min_bars, now=now)
         if view.timeframe != expected[role] and view.bars_available:
             # Not fatal, but the caller asked for a specific triple and did not
             # get it, so the analysis is not the one they think they requested.
@@ -313,19 +355,47 @@ def analyze_multi_timeframe(
                     f"{role} points {direction.value} while {other_role} points {other.value}"
                 )
 
+    # Abstention is not disagreement. A ranging or uncertain view carries no
+    # directional information, so it is dropped from the average and the
+    # remaining weights are renormalised -- the same rule ``scoring._blend``
+    # applies to an indicator that is undefined on the bars available. Dividing
+    # by the full stack instead scored an abstaining view exactly like an
+    # opposing one, which put a hard ceiling on the achievable agreement: with
+    # these weights a symbol whose confirmation and regime views were both
+    # ranging could reach at most 0.25 and so could never clear a 0.5 gate, no
+    # matter how cleanly its execution view was trending.
+    voted_weight = up_weight + down_weight
+    abstaining = [
+        view.role
+        for view in views
+        if view.quality.status is not QualityStatus.FAIL and directions.get(view.role) is None
+    ]
+
     aligned: SignalDirection | None = None
     score = 0.0
-    if available_weight > 0 and not conflicts and voted:
+    if voted_weight > 0 and not conflicts:
         if up_weight > 0 and down_weight == 0:
             aligned = SignalDirection.UP
-            score = up_weight / available_weight
+            score = up_weight / voted_weight
         elif down_weight > 0 and up_weight == 0:
             aligned = SignalDirection.DOWN
-            score = down_weight / available_weight
+            score = down_weight / voted_weight
+
+    # Renormalising makes the score say "the views that spoke were unanimous"
+    # rather than "the whole stack agrees", so participation has to travel with
+    # it or the two get confused. It is measured against the weight that was
+    # usable, not the full stack, so a view lost to a data-quality failure does
+    # not read as an abstention it never made.
+    participation = voted_weight / available_weight if available_weight > 0 else 0.0
 
     if not voted and views:
         warnings.append(
             "no view carries a direction; every usable timeframe is ranging, shocked or uncertain"
+        )
+    elif abstaining:
+        warnings.append(
+            f"agreement is measured over {round(participation, 2)} of the usable timeframe "
+            f"weight; these views abstain and are excluded: {', '.join(sorted(abstaining))}"
         )
 
     return MultiTimeframeSnapshot(
@@ -335,6 +405,8 @@ def analyze_multi_timeframe(
         views=views,
         aligned_direction=aligned,
         alignment_score=round(min(1.0, max(0.0, score)), 4),
+        participation=round(min(1.0, max(0.0, participation)), 4),
+        abstaining_roles=sorted(abstaining),
         conflicts=conflicts,
         warnings=warnings,
     )

@@ -48,3 +48,5 @@ desktop.ini
 
 # ---- Claude Code local overrides ----
 .claude/settings.local.json
+
+.vercel

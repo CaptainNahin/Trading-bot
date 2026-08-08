@@ -36,7 +36,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Literal
 
 from quantedge.config import get_scanner_config
-from quantedge.contracts import SignalDirection, StructureReport
+from quantedge.contracts import LiquidityPool, SignalDirection, StructureEvent, StructureReport
 from quantedge.errors import InsufficientDataError
 
 if TYPE_CHECKING:
@@ -130,18 +130,26 @@ def find_swings(
 
 
 def _sequence_direction(swings: list[dict[str, Any]], *, want_rising: bool) -> bool:
-    """Whether the last three swings move consistently in one direction.
+    """Whether the two most recent confirmed swings step in one direction.
 
-    Three points rather than two: two swings establish only a single step, which
-    one noisy pivot can produce in any market. Three give two consecutive steps
-    that must agree.
+    "Higher high" is a relation between two swings, so two points is the
+    definition, not a shortcut. Requiring three strictly-monotonic points here
+    demanded two consecutive noise-free steps in *both* the highs and the lows
+    at once -- four perfect steps -- which live intraday data almost never
+    satisfies: every symbol and timeframe measured came back ``UNCLEAR``, so the
+    trend branches of the regime classifier were unreachable and no signal could
+    ever be emitted. That is a stricter rule than this module documents.
+
+    Noise robustness comes from the label requiring highs *and* lows to agree
+    (a single noisy pivot moves one series, not both), and trend *strength* is
+    graded downstream by ADX and EMA alignment rather than by pivot counting.
     """
-    if len(swings) < 3:
+    if len(swings) < 2:
         return False
-    prices = [Decimal(s["price"]) for s in swings[-3:]]
+    prices = [Decimal(s["price"]) for s in swings[-2:]]
     if want_rising:
-        return prices[0] < prices[1] < prices[2]
-    return prices[0] > prices[1] > prices[2]
+        return prices[0] < prices[1]
+    return prices[0] > prices[1]
 
 
 def analyze_structure(
@@ -258,11 +266,28 @@ def analyze_structure(
     if failure_note:
         notes.append(failure_note)
 
-    if breakout_candidate and failed_breakout:
-        notes.append(
-            "a prior breakout in this window already failed; treat the current "
-            "extension as weaker evidence, not confirmation"
-        )
+    # -- structural events (BOS / CHOCH / SWEEP) ------------------------------- #
+    events, last_bos, last_choch = _detect_structural_events(
+        bars, swing_highs, swing_lows, structure, buffer
+    )
+
+    # -- liquidity pools (EQUAL HIGHS / EQUAL LOWS) ---------------------------- #
+    equal_highs, equal_lows = _detect_liquidity_pools(bars, swing_highs, swing_lows, buffer)
+
+    # -- internal vs external structure ---------------------------------------- #
+    int_highs, int_lows = find_swings(
+        bars, lookback=max(2, lookback // 2), confirmation_bars=max(2, confirmation // 2)
+    )
+    internal_structure = _classify_from_swings(int_highs, int_lows, min_swings=3)
+    external_structure = structure
+
+    # -- position within external range (PREMIUM / DISCOUNT / EQUILIBRIUM) ---- #
+    prem_disc, range_pos = _calculate_premium_discount(last_close, swing_highs, swing_lows)
+
+    # -- structure confidence --------------------------------------------------- #
+    confidence = _calculate_structure_confidence(
+        structure, internal_structure, total_swings, breakout_candidate, failed_breakout, events
+    )
 
     return StructureReport(
         symbol=symbol,
@@ -280,6 +305,16 @@ def analyze_structure(
         nearest_resistance=resistance,
         nearest_support=support,
         notes=notes,
+        events=events,
+        last_bos=last_bos,
+        last_choch=last_choch,
+        equal_highs=equal_highs,
+        equal_lows=equal_lows,
+        internal_structure=internal_structure,
+        external_structure=external_structure,
+        premium_discount=prem_disc,
+        range_position=range_pos,
+        structure_confidence=confidence,
     )
 
 
@@ -361,3 +396,215 @@ def _detect_failed_breakout(
                     f"and closed back above it"
                 )
     return False, None
+
+
+def _detect_structural_events(
+    bars: list[Candle],
+    swing_highs: list[dict[str, Any]],
+    swing_lows: list[dict[str, Any]],
+    trend: StructureLabel,
+    buffer: Decimal,
+) -> tuple[list[StructureEvent], StructureEvent | None, StructureEvent | None]:
+    events: list[StructureEvent] = []
+    last_bos: StructureEvent | None = None
+    last_choch: StructureEvent | None = None
+
+    if not bars or len(bars) < 5:
+        return events, last_bos, last_choch
+
+    for i in range(1, len(bars)):
+        bar = bars[i]
+        known_highs = [s for s in swing_highs if s["confirmed_at_index"] < i]
+        known_lows = [s for s in swing_lows if s["confirmed_at_index"] < i]
+
+        if not known_highs and not known_lows:
+            continue
+
+        if known_highs:
+            latest_h = known_highs[-1]
+            h_lvl = Decimal(latest_h["price"])
+            if bar.close > h_lvl + buffer:
+                is_bos = trend in ("UPTREND", "UNCLEAR", "RANGE")
+                evt_type = "BOS" if is_bos else "CHOCH"
+                direction = SignalDirection.UP
+                evt = StructureEvent(
+                    event_type=evt_type,
+                    direction=direction,
+                    level=h_lvl,
+                    price=bar.close,
+                    occurred_at_index=i,
+                    occurred_at_utc=bar.close_time_utc,
+                    level_index=latest_h["index"],
+                    level_confirmed_at_index=latest_h["confirmed_at_index"],
+                    confidence=0.8 if is_bos else 0.85,
+                    evidence=[f"{evt_type} upside break of {h_lvl} at bar {i}"],
+                    invalidation=f"Close below {h_lvl}",
+                )
+                events.append(evt)
+                if evt_type == "BOS":
+                    last_bos = evt
+                else:
+                    last_choch = evt
+
+        if known_lows:
+            latest_l = known_lows[-1]
+            l_lvl = Decimal(latest_l["price"])
+            if bar.close < l_lvl - buffer:
+                is_bos = trend in ("DOWNTREND", "UNCLEAR", "RANGE")
+                evt_type = "BOS" if is_bos else "CHOCH"
+                direction = SignalDirection.DOWN
+                evt = StructureEvent(
+                    event_type=evt_type,
+                    direction=direction,
+                    level=l_lvl,
+                    price=bar.close,
+                    occurred_at_index=i,
+                    occurred_at_utc=bar.close_time_utc,
+                    level_index=latest_l["index"],
+                    level_confirmed_at_index=latest_l["confirmed_at_index"],
+                    confidence=0.8 if is_bos else 0.85,
+                    evidence=[f"{evt_type} downside break of {l_lvl} at bar {i}"],
+                    invalidation=f"Close above {l_lvl}",
+                )
+                events.append(evt)
+                if evt_type == "BOS":
+                    last_bos = evt
+                else:
+                    last_choch = evt
+
+    return events, last_bos, last_choch
+
+
+def _detect_liquidity_pools(
+    bars: list[Candle],
+    swing_highs: list[dict[str, Any]],
+    swing_lows: list[dict[str, Any]],
+    buffer: Decimal,
+) -> tuple[list[LiquidityPool], list[LiquidityPool]]:
+    eq_highs: list[LiquidityPool] = []
+    eq_lows: list[LiquidityPool] = []
+
+    if len(swing_highs) >= 2:
+        for i in range(len(swing_highs) - 1):
+            h1 = Decimal(swing_highs[i]["price"])
+            h2 = Decimal(swing_highs[i + 1]["price"])
+            tol = max(buffer, h1 * Decimal("0.001"))
+            if abs(h1 - h2) <= tol:
+                avg = (h1 + h2) / Decimal("2")
+                swept = any(
+                    b.high > avg + tol for b in bars[swing_highs[i + 1]["confirmed_at_index"] :]
+                )
+                eq_highs.append(
+                    LiquidityPool(
+                        kind="EQUAL_HIGHS",
+                        price=avg,
+                        touches=2,
+                        indices=[swing_highs[i]["index"], swing_highs[i + 1]["index"]],
+                        confirmed_at_index=max(
+                            swing_highs[i]["confirmed_at_index"],
+                            swing_highs[i + 1]["confirmed_at_index"],
+                        ),
+                        tolerance_used=tol,
+                        swept=swept,
+                    )
+                )
+
+    if len(swing_lows) >= 2:
+        for i in range(len(swing_lows) - 1):
+            l1 = Decimal(swing_lows[i]["price"])
+            l2 = Decimal(swing_lows[i + 1]["price"])
+            tol = max(buffer, l1 * Decimal("0.001"))
+            if abs(l1 - l2) <= tol:
+                avg = (l1 + l2) / Decimal("2")
+                swept = any(
+                    b.low < avg - tol for b in bars[swing_lows[i + 1]["confirmed_at_index"] :]
+                )
+                eq_lows.append(
+                    LiquidityPool(
+                        kind="EQUAL_LOWS",
+                        price=avg,
+                        touches=2,
+                        indices=[swing_lows[i]["index"], swing_lows[i + 1]["index"]],
+                        confirmed_at_index=max(
+                            swing_lows[i]["confirmed_at_index"],
+                            swing_lows[i + 1]["confirmed_at_index"],
+                        ),
+                        tolerance_used=tol,
+                        swept=swept,
+                    )
+                )
+
+    return eq_highs, eq_lows
+
+
+def _classify_from_swings(
+    highs: list[dict[str, Any]], lows: list[dict[str, Any]], min_swings: int = 3
+) -> StructureLabel:
+    total = len(highs) + len(lows)
+    if total < min_swings:
+        return "UNCLEAR"
+    has_hh = _sequence_direction(highs, want_rising=True)
+    has_hl = _sequence_direction(lows, want_rising=True)
+    has_lh = _sequence_direction(highs, want_rising=False)
+    has_ll = _sequence_direction(lows, want_rising=False)
+
+    if has_hh and has_hl:
+        return "UPTREND"
+    if has_lh and has_ll:
+        return "DOWNTREND"
+    if has_lh and has_hl:
+        return "RANGE"
+    return "UNCLEAR"
+
+
+def _calculate_premium_discount(
+    last_close: Decimal, swing_highs: list[dict[str, Any]], swing_lows: list[dict[str, Any]]
+) -> tuple[Literal["PREMIUM", "DISCOUNT", "EQUILIBRIUM"] | None, float | None]:
+    if not swing_highs or not swing_lows:
+        return None, None
+
+    max_high = Decimal(max(s["price"] for s in swing_highs[-3:]))
+    min_low = Decimal(min(s["price"] for s in swing_lows[-3:]))
+
+    if max_high <= min_low:
+        return None, None
+
+    range_span = max_high - min_low
+    pos = float((last_close - min_low) / range_span)
+
+    if 0.45 <= pos <= 0.55:
+        zone: Literal["PREMIUM", "DISCOUNT", "EQUILIBRIUM"] = "EQUILIBRIUM"
+    elif pos > 0.55:
+        zone = "PREMIUM"
+    else:
+        zone = "DISCOUNT"
+
+    return zone, pos
+
+
+def _calculate_structure_confidence(
+    structure: StructureLabel,
+    internal_structure: StructureLabel,
+    total_swings: int,
+    breakout_candidate: bool,
+    failed_breakout: bool,
+    events: list[StructureEvent],
+) -> float:
+    if structure == "UNCLEAR":
+        return 0.2
+
+    base = 0.5
+    if structure in ("UPTREND", "DOWNTREND"):
+        base += 0.2
+    if structure == internal_structure:
+        base += 0.15
+    if total_swings >= 6:
+        base += 0.05
+    if breakout_candidate:
+        base += 0.05
+    if failed_breakout:
+        base -= 0.25
+    if events:
+        base += 0.05
+
+    return max(0.0, min(1.0, round(base, 2)))

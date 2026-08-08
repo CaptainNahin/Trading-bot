@@ -20,12 +20,15 @@ but the guarantee is the same as the SQL path, and callers that read
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from quantedge.contracts import (
+    AIDecision,
     Candle,
     DataQualityReport,
     EconomicEvent,
@@ -35,6 +38,8 @@ from quantedge.contracts import (
     Quote,
     RegimeReport,
     SettledSignal,
+    SignalDirection,
+    SignalStatus,
     StructureReport,
     SymbolInfo,
     Timeframe,
@@ -49,6 +54,19 @@ if TYPE_CHECKING:
 __all__ = ["MemoryRepository"]
 
 log = get_logger(__name__)
+
+
+def _parse_utc(raw: str) -> datetime | None:
+    """Parse an ISO timestamp, or ``None`` when it cannot be read.
+
+    Matches the SQL backend's helper so a stored signal resolves to the same
+    expiry on either backend.
+    """
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
 
 
 class MemoryRepository:
@@ -81,6 +99,7 @@ class MemoryRepository:
         self._signals: list[dict[str, Any]] = []
         self._settled: list[SettledSignal] = []
         self._audit_log: list[dict[str, Any]] = []
+        self._memories: list[Any] = []
         self._lock = threading.RLock()
 
         log.warning(
@@ -455,6 +474,53 @@ class MemoryRepository:
                 )
             self._settled.append(settled)
 
+    def unsettled_expired_signals(self, *, limit: int = 100) -> list[AIDecision]:
+        """Signals past expiry with no settlement row yet.
+
+        Mirrors the SQL backend, including the skip on a missing or unreadable
+        ``expiry_utc``: the worker must behave the same whichever backend is
+        configured, or a bug would only reproduce on one of them.
+
+        This backend stores ``llm_response`` as the object it was handed rather
+        than as JSON, so both a contract instance and a plain dict are accepted.
+        """
+        now = utc_now()
+        with self._lock:
+            settled_ids = {s.signal_id for s in self._settled}
+            rows = [r for r in self._signals if r["signal_id"] not in settled_ids]
+
+        due: list[AIDecision] = []
+        for row in rows:
+            payload = row.get("llm_response")
+            if payload is None:
+                continue
+            data = payload if isinstance(payload, dict) else payload.model_dump()
+            expiry = data.get("expiry_utc")
+            direction = data.get("direction")
+            if not expiry or direction is None:
+                continue
+            parsed = expiry if isinstance(expiry, datetime) else _parse_utc(str(expiry))
+            if parsed is None or parsed > now:
+                continue
+            raw_price = data.get("reference_price")
+            price: Decimal | None = None
+            if raw_price is not None:
+                with contextlib.suppress(InvalidOperation, ValueError):
+                    price = Decimal(str(raw_price))
+            due.append(
+                AIDecision(
+                    decision_id=row["signal_id"],
+                    symbol=data.get("asset") or "",
+                    horizon=data.get("horizon") or "",
+                    status=SignalStatus.SIGNAL,
+                    direction=SignalDirection(direction),
+                    reference_price=price,
+                    expiry_utc=parsed,
+                )
+            )
+        due.sort(key=lambda d: d.expiry_utc or now)
+        return due[: max(1, limit)]
+
     def settled_signals(
         self, *, symbol: str | None = None, horizon: str | None = None, limit: int = 100
     ) -> list[SettledSignal]:
@@ -500,6 +566,31 @@ class MemoryRepository:
         with self._lock:
             candidates = list(self._audit_log)
             if event_type:
-                candidates = [e for e in candidates if e["event_type"] == event_type]
-            candidates.sort(key=lambda e: e["event_time_utc"], reverse=True)
+                candidates = [e for e in candidates if e.get("event_type") == event_type]
+            candidates.sort(key=lambda e: e.get("event_time_utc") or utc_now(), reverse=True)
+            return candidates[:limit]
+
+    def save_trade_memory(self, memory: Any) -> None:
+        with self._lock:
+            self._memories.append(memory)
+
+    def list_trade_memories(
+        self,
+        *,
+        symbol: str | None = None,
+        regime: str | None = None,
+        outcome: str | None = None,
+        limit: int = 100,
+    ) -> list[Any]:
+        with self._lock:
+            candidates = list(self._memories)
+            if symbol:
+                candidates = [m for m in candidates if getattr(m, "symbol", None) == symbol]
+            if regime:
+                candidates = [m for m in candidates if str(getattr(m, "regime", "")) == str(regime)]
+            if outcome:
+                candidates = [
+                    m for m in candidates if str(getattr(m, "outcome", "")) == str(outcome)
+                ]
+            candidates.sort(key=lambda m: getattr(m, "created_at_utc", utc_now()), reverse=True)
             return candidates[:limit]
