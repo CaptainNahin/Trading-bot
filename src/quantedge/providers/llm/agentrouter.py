@@ -47,7 +47,7 @@ log = get_logger(__name__)
 # internally).  When the user sets AGENTROUTER_BASE_URL to "https://agentrouter.org/v1"
 # we strip the trailing "/v1" so the SDK doesn't double it.
 _DEFAULT_BASE_URL = "https://agentrouter.org"
-_DEFAULT_MODEL = "claude-sonnet-4-5-20250514"
+_DEFAULT_MODEL = "claude-opus-5"
 _TIMEOUT_SECONDS = 45.0
 
 # Low but non-zero: the review is a judgement over fixed evidence, so there is
