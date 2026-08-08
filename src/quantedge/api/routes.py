@@ -337,6 +337,33 @@ def post_bot_chat(request: ChatRequest) -> dict[str, Any]:
 
 
 @router.get("/bot/time-limits")
-def get_time_limits() -> dict[str, Any]:
-    """Selectable trade durations and the horizon each one is analysed on."""
-    return {"time_limits": [limit.to_dict() for limit in available_time_limits()]}
+def get_time_limits() -> list[dict[str, str]]:
+    """Get offered validity windows and their corresponding horizon names."""
+    return [
+        {"limit": str(limit), "horizon": horizon.name}
+        for limit, horizon in config.HORIZON_MAP.items()
+    ]
+
+
+@router.get("/debug-db")
+def debug_db():
+    try:
+        from quantedge.repositories.database import engine
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            res = conn.execute(text("SELECT 1")).scalar()
+            return {"status": "ok", "result": res}
+    except Exception as e:
+        import traceback
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+@router.get("/debug-db")
+def debug_db():
+    try:
+        from quantedge.repositories.database import engine
+        from sqlalchemy import text
+        with engine.connect() as conn:
+            res = conn.execute(text("SELECT 1")).scalar()
+            return {"status": "ok", "result": res}
+    except Exception as e:
+        import traceback
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
