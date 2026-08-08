@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import FastAPI
+import base64
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from quantedge.api.routes import router
@@ -32,6 +33,25 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app_inst.middleware("http")
+    async def basic_auth_middleware(request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+            
+        auth = request.headers.get("Authorization")
+        if not auth or not auth.startswith("Basic "):
+            return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
+            
+        try:
+            decoded = base64.b64decode(auth[6:]).decode("utf-8")
+            username, password = decoded.split(":", 1)
+            if password != "Bot@2026":
+                return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
+        except Exception:
+            return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
+            
+        return await call_next(request)
 
     app_inst.include_router(router)
 
