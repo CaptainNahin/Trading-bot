@@ -270,9 +270,12 @@ def get_bot_memories(
 @router.get("/bot/memory-stats")
 def get_bot_memory_stats() -> dict[str, Any]:
     """Fetch memory bank performance statistics and learned DO/DONT rules."""
-    from quantedge.services import memory as mem
-
-    return mem.get_memory_bank_summary()
+    try:
+        from quantedge.services import memory as mem
+        return mem.get_memory_bank_summary()
+    except Exception as e:
+        import traceback
+        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 
 
 # ------------------------------------------------------------------ #
@@ -345,28 +348,6 @@ def get_time_limits() -> list[dict[str, str]]:
     ]
 
 
-@router.get("/debug-db")
-def debug_db():
-    try:
-        from quantedge.repositories.database import engine
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            res = conn.execute(text("SELECT 1")).scalar()
-            return {"status": "ok", "result": res}
-    except Exception as e:
-        import traceback
-        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
-@router.get("/debug-db")
-def debug_db():
-    try:
-        from quantedge.repositories.database import engine
-        from sqlalchemy import text
-        with engine.connect() as conn:
-            res = conn.execute(text("SELECT 1")).scalar()
-            return {"status": "ok", "result": res}
-    except Exception as e:
-        import traceback
-        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
 @router.get("/debug-db")
 def debug_db():
     try:
