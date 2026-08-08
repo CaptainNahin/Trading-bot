@@ -13,7 +13,7 @@
     "APP_ENV": "production",
     "LOG_LEVEL": "INFO",
     "SQLITE_PATH": "/tmp/quantedge.db",
-    "DATABASE_URL": "postgresql+psycopg://postgres.ygeydhkenetbgvfqchih:Bot%402026Nahin%402011@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres",
+    "DATABASE_URL": "postgresql+pg8000://postgres.ygeydhkenetbgvfqchih:Bot%402026Nahin%402011@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres",
     "API_AUTH_TOKEN": "SecureQuantEdgeToken2026",
     "PRIMARY_FOREX_PROVIDER": "twelvedata",
     "TWELVE_DATA_API_KEY": "b94342ca208d435a93faedeed7fc36e8",
@@ -21,7 +21,7 @@
     "LLM_PROVIDER": "agentrouter",
     "AGENTROUTER_API_KEY": "sk-2rBiRjCipjN6lWcps2KcXNAkoNdzcqY0e8VN7oAExq5WRcYC",
     "ANTHROPIC_API_KEY": "sk-2rBiRjCipjN6lWcps2KcXNAkoNdzcqY0e8VN7oAExq5WRcYC",
-    "ANTHROPIC_MODEL": "claude-sonnet-4-5",
+    "ANTHROPIC_MODEL": "claude-opus-5",
     "BINANCE_REST_BASE_URL": "https://data-api.binance.vision",
     "BINANCE_WS_BASE_URL": "wss://stream.binance.com:9443",
     "CORS_ALLOW_ORIGINS": "http://localhost:3000,https://trading-bot-six-kohl.vercel.app"
