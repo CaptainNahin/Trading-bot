@@ -253,8 +253,8 @@ class AgentRouterLLMProvider(BaseLLMProvider):
             extra={
                 "provider": self.provider_name,
                 "model": self.model_name,
-                "prompt_tokens": getattr(response.usage, "input_tokens", None),
-                "completion_tokens": getattr(response.usage, "output_tokens", None),
+                "prompt_tokens": getattr(getattr(response, "usage", None), "input_tokens", None),
+                "completion_tokens": getattr(getattr(response, "usage", None), "output_tokens", None),
             },
         )
         return text
