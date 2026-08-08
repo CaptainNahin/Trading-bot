@@ -1341,3 +1341,4 @@ websockets==17.0.1 \
     # via
     #   quantedge-live-gateway
     #   uvicorn
+psycopg>=3.1.19
