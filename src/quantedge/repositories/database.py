@@ -100,6 +100,9 @@ def make_engine(url: str | None = None, *, echo: bool = False) -> Engine:
     that has nothing to do with connection handling.
     """
     dsn = url or get_settings().resolved_database_url
+    if dsn and dsn.startswith("postgresql+psycopg://"):
+        dsn = dsn.replace("postgresql+psycopg://", "postgresql://", 1)
+        
     parsed = make_url(dsn)
     is_sqlite = parsed.get_backend_name() == "sqlite"
 
