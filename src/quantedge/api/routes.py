@@ -344,12 +344,10 @@ def post_bot_chat(request: ChatRequest) -> dict[str, Any]:
 
 
 @router.get("/bot/time-limits")
-def get_time_limits() -> list[dict[str, str]]:
+def get_time_limits() -> dict[str, list[dict[str, Any]]]:
     """Get offered validity windows and their corresponding horizon names."""
-    return [
-        {"limit": str(limit), "horizon": horizon.name}
-        for limit, horizon in config.HORIZON_MAP.items()
-    ]
+    limits = available_time_limits()
+    return {"time_limits": [t.to_dict() for t in limits]}
 
 
 @router.get("/debug-db")
