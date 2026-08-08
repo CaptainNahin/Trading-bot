@@ -336,6 +336,9 @@ def post_bot_chat(request: ChatRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=exc.message) from exc
     except QuantEdgeError as exc:
         raise HTTPException(status_code=503, detail=f"{exc.code}: {exc.message}") from exc
+    except Exception as exc:
+        import traceback
+        raise HTTPException(status_code=500, detail={"error": str(exc), "traceback": traceback.format_exc()})
     return reply.to_dict()
 
 
