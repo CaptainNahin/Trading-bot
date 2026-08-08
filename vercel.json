@@ -13,7 +13,7 @@
     "APP_ENV": "production",
     "LOG_LEVEL": "INFO",
     "SQLITE_PATH": "/tmp/quantedge.db",
-    "DATABASE_URL": "postgresql+psycopg://postgres.ygeydhkenetbgvfqchih:Bot%402026Nahin%402011@aws-0-ap-southeast-1.pooler.supabase.com:5432/postgres",
+    "DATABASE_URL": "postgresql+psycopg://postgres.ygeydhkenetbgvfqchih:Bot%402026Nahin%402011@aws-0-ap-southeast-1.pooler.supabase.com:6543/postgres",
     "API_AUTH_TOKEN": "SecureQuantEdgeToken2026",
     "PRIMARY_FOREX_PROVIDER": "twelvedata",
     "TWELVE_DATA_API_KEY": "b94342ca208d435a93faedeed7fc36e8",
