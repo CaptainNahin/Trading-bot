@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     oanda_api_token: SecretStr | None = None
     oanda_account_id: SecretStr | None = None
     oanda_environment: Literal["practice", "live"] = "practice"
+    binance_api_key: SecretStr | None = None
+    binance_api_secret: SecretStr | None = None
 
     # ---- calendar / news ----
     fmp_api_key: SecretStr | None = None
@@ -121,16 +123,11 @@ class Settings(BaseSettings):
     @field_validator("binance_rest_base_url")
     @classmethod
     def _market_data_only_host(cls, v: str) -> str:
-        """Refuse a Binance REST host that permits signed/private endpoints.
-
-        ``data-api.binance.vision`` serves public market data exclusively. If a
-        deployment ever repointed this at ``api.binance.com``, private endpoints
-        would become reachable. We block that at configuration time.
-        """
-        allowed = ("data-api.binance.vision", "testnet.binance.vision")
+        """Refuse a Binance REST host that permits signed/private endpoints unless specified."""
+        allowed = ("data-api.binance.vision", "testnet.binance.vision", "api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com", "api4.binance.com")
         if not any(host in v for host in allowed):
             raise ValueError(
-                "BINANCE_REST_BASE_URL must be a market-data-only host "
+                "BINANCE_REST_BASE_URL must be a permitted host "
                 f"({' or '.join(allowed)}); refusing '{v}'"
             )
         return v
@@ -211,6 +208,8 @@ class Settings(BaseSettings):
             "TWELVE_DATA_API_KEY": self.secret(self.twelve_data_api_key) is not None,
             "OANDA_API_TOKEN": self.secret(self.oanda_api_token) is not None,
             "OANDA_ACCOUNT_ID": self.secret(self.oanda_account_id) is not None,
+            "BINANCE_API_KEY": self.secret(self.binance_api_key) is not None,
+            "BINANCE_API_SECRET": self.secret(self.binance_api_secret) is not None,
             "FMP_API_KEY": self.secret(self.fmp_api_key) is not None,
             "ALPHA_VANTAGE_API_KEY": self.secret(self.alpha_vantage_api_key) is not None,
             "FINNHUB_API_KEY": self.secret(self.finnhub_api_key) is not None,

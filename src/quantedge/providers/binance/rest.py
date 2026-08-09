@@ -85,9 +85,13 @@ class BinanceRestProvider(MarketDataProvider):
                 "symbols": True,
             },
         )
+        api_key = settings.secret(settings.binance_api_key)
+        headers = {"X-MBX-APIKEY": api_key} if api_key else None
+        
         self._client = ResilientHttpClient(
             provider=self.name,
             base_url=self._base_url,
+            default_headers=headers,
             config=HttpClientConfig(
                 timeout_seconds=float(defaults.get("timeout_seconds", 10.0)),
                 connect_timeout_seconds=float(defaults.get("connect_timeout_seconds", 5.0)),
