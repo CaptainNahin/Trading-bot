@@ -206,9 +206,9 @@ class JsonFormatter(logging.Formatter):
             if key not in _RESERVED and not key.startswith("_"):
                 try:
                     json.dumps(value)
-                    payload[key] = value
+                    payload[key] = _redact_arg(value)
                 except (TypeError, ValueError):
-                    payload[key] = redact(value)
+                    payload[key] = redact(str(value))
         if record.exc_text:
             payload["exception"] = record.exc_text
         return json.dumps(payload, default=str)

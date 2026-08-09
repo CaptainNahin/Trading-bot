@@ -124,14 +124,12 @@ class AgentRouterLLMProvider(BaseLLMProvider):
                 max_tokens=1,
                 messages=[{"role": "user", "content": "ping"}],
             )
-            # Confirm we got a valid response defensively
-            if isinstance(response, str):
-                pass
-            elif isinstance(response, dict):
-                pass
-            else:
+            # Touch the payload so a malformed body fails here rather than at the
+            # first real call. A str or dict body is what some gateways return in
+            # place of a message object; either is enough to prove reachability.
+            if not isinstance(response, str | dict):
                 _ = getattr(response, "content", None)
-        except Exception as exc:  # noqa: BLE001 - a health probe reports any failure, not just ours
+        except Exception as exc:  # noqa: BLE001 - a health probe reports any failure
             err_msg = str(exc)
             # Truncate long error messages for the health report
             if len(err_msg) > 200:
@@ -244,13 +242,14 @@ class AgentRouterLLMProvider(BaseLLMProvider):
                 self.provider_name, "model returned an empty message"
             )
 
+        usage = getattr(response, "usage", None)
         log.info(
             "llm review completed",
             extra={
                 "provider": self.provider_name,
                 "model": self.model_name,
-                "prompt_tokens": getattr(getattr(response, "usage", None), "input_tokens", None),
-                "completion_tokens": getattr(getattr(response, "usage", None), "output_tokens", None),
+                "prompt_tokens": getattr(usage, "input_tokens", None),
+                "completion_tokens": getattr(usage, "output_tokens", None),
             },
         )
         return text

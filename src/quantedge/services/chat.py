@@ -56,6 +56,11 @@ log = get_logger(__name__)
 
 _MAX_MESSAGE_CHARS = 2000
 
+# Hold assumed when a symbol is named without a duration. 15m is the shortest
+# horizon whose confirmation and regime timeframes (1h/4h) are slow enough to be
+# meaningful, so it is the least presumptuous default rather than the fastest.
+_DEFAULT_HOLD_MINUTES = 15
+
 
 class Intent(str, Enum):
     """What the user is asking for."""
@@ -320,9 +325,15 @@ def _handle_signal(
         generate_trade_recommendation,
     )
 
+    assumption_note = ""
+    alternatives: list[dict[str, Any]] = []
+
     if parsed.symbol is None:
         try:
-            rec = generate_best_trade_recommendation(time_limit_minutes=parsed.minutes)
+            rec = generate_best_trade_recommendation(
+                time_limit_minutes=parsed.minutes,
+                alternatives_out=alternatives,
+            )
         except NoTradeReason as exc:
             return _no_trade_reply("any symbol", parsed.minutes or 0, exc)
         except ValidationError as exc:
@@ -345,23 +356,19 @@ def _handle_signal(
             )
 
         minutes_used = parsed.minutes or horizon_minutes(rec.horizon)
+        assumption_note = _alternatives_note(alternatives)
     else:
         symbol = parsed.symbol
-        # Bound through a local so `minutes_used` is an int on both branches:
-        # the None case returns, but that narrowing does not survive the join.
-        requested = parsed.minutes or default_minutes
-        if requested is None:
-            return ChatReply(
-                text=(
-                    f"How long do you want to hold {symbol}? Pick a time limit and I'll "
-                    f"analyse the timeframes that match it: "
-                    f"{', '.join(limit.label for limit in available_time_limits())}."
-                ),
-                intent=Intent.SIGNAL,
-                data={
-                    "symbol": symbol,
-                    "time_limits": [t.to_dict() for t in available_time_limits()],
-                },
+        # Asking for a symbol is a request for that symbol. Blocking on a missing
+        # duration turned "signal for BTC" into a question, so the one thing the
+        # user actually named went unanswered. A duration is needed to pick the
+        # timeframes, so the shortest configured horizon that is not a scalp is
+        # assumed, stated in the reply, and overridden the moment one is given.
+        requested = parsed.minutes or default_minutes or _DEFAULT_HOLD_MINUTES
+        if parsed.minutes is None and default_minutes is None:
+            assumption_note = (
+                f"\n\nI assumed a {_DEFAULT_HOLD_MINUTES}-minute hold since you didn't say. "
+                f"Other options: {', '.join(t.label for t in available_time_limits())}."
             )
 
         minutes_used = requested
@@ -369,7 +376,7 @@ def _handle_signal(
             horizon = horizon_for_minutes(minutes_used)
             rec = generate_trade_recommendation(symbol, time_limit=horizon)
         except NoTradeReason as exc:
-            return _no_trade_reply(symbol, minutes_used, exc)
+            return _no_trade_reply(symbol, minutes_used, exc, note=assumption_note)
         except ValidationError as exc:
             return ChatReply(
                 text=f"I can't analyse that: {exc.message}",
@@ -397,14 +404,44 @@ def _handle_signal(
     state["last_recommendation"] = payload
 
     return ChatReply(
-        text=_format_recommendation(rec, minutes_used, expiry),
+        text=_format_recommendation(rec, minutes_used, expiry) + assumption_note,
         intent=Intent.SIGNAL,
         data=payload,
         warnings=list(rec.warnings),
     )
 
 
-def _no_trade_reply(symbol: str, minutes: int, exc: Any) -> ChatReply:
+def _alternatives_note(alternatives: list[dict[str, Any]]) -> str:
+    """The rest of the board, so one top scorer does not look like the whole market.
+
+    The sweep ranks every candidate and returns one. Showing only that one made a
+    6-UP/3-DOWN board read as "the bot only ever says UP", which was a reporting
+    artefact rather than a directional bias. These are scanner candidates that have
+    not been through the risk gates, so they are labelled as such and no entry,
+    stop or target is quoted for them.
+    """
+    if not alternatives:
+        return ""
+
+    # Top two of each direction rather than the top four overall. Ranking by score
+    # alone listed four UPs under an "11 UP / 6 DOWN" header, which still read as a
+    # one-way board even though the DOWN setups were right there. Order within each
+    # direction stays score-descending, so this is a different slice of the same
+    # deterministic ranking, not a reordering of it.
+    ups = [a for a in alternatives if a["direction"] == "UP"]
+    downs = [a for a in alternatives if a["direction"] != "UP"]
+    top = ups[:2] + downs[:2]
+    listed = ", ".join(
+        f"{a['symbol']} {a['direction']} ({a['horizon']}, {a['heuristic_score']:.2f})"
+        for a in top
+    )
+    return (
+        f"\n\nAlso on the board ({len(ups)} UP / {len(downs)} DOWN, not risk-checked): "
+        f"{listed}. Name one and I'll run the full analysis on it."
+    )
+
+
+def _no_trade_reply(symbol: str, minutes: int, exc: Any, note: str = "") -> ChatReply:
     """Declining is an answer. Say why, and do not offer a direction anyway."""
 
     time_text = "any time limit" if minutes == 0 else f"a {minutes}-minute hold"
@@ -419,7 +456,7 @@ def _no_trade_reply(symbol: str, minutes: int, exc: Any) -> ChatReply:
     return ChatReply(
         text=(
             f"{headline}{body}{detail} I'd rather tell you there's nothing here "
-            "than hand you a direction the data doesn't support."
+            "than hand you a direction the data doesn't support." + note
         ),
         intent=Intent.SIGNAL,
         data={

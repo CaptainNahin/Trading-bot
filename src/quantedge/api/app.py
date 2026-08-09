@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import os
+import secrets
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 
-import base64
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
@@ -13,6 +16,12 @@ from fastapi.staticfiles import StaticFiles
 from quantedge.api.routes import router
 
 STATIC_DIR = Path(__file__).resolve().parents[3] / "static"
+
+# The gate password. Read from the environment so the deployed value can be
+# rotated without a code change; the literal remains only as the fallback the
+# existing deployment is already using, so setting the variable is what actually
+# removes it from source.
+_UI_PASSWORD = os.getenv("QUANTEDGE_UI_PASSWORD", "Bot@2026")
 
 
 def create_app() -> FastAPI:
@@ -35,22 +44,32 @@ def create_app() -> FastAPI:
     )
 
     @app_inst.middleware("http")
-    async def basic_auth_middleware(request: Request, call_next):
+    async def basic_auth_middleware(
+        request: Request,
+        call_next: Callable[[Request], Awaitable[Response]],
+    ) -> Response:
+        challenge = Response(
+            "Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"}
+        )
         if request.method == "OPTIONS":
             return await call_next(request)
-            
+
         auth = request.headers.get("Authorization")
         if not auth or not auth.startswith("Basic "):
-            return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
-            
+            return challenge
+
+        # A malformed header is a failed auth, not a server error: bad base64,
+        # non-UTF-8 bytes and a missing colon all land here and all mean the same
+        # thing to the caller. compare_digest keeps the comparison constant-time.
         try:
-            decoded = base64.b64decode(auth[6:]).decode("utf-8")
-            username, password = decoded.split(":", 1)
-            if password != "Bot@2026":
-                return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
-        except Exception:
-            return Response("Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"})
-            
+            decoded = base64.b64decode(auth[6:], validate=True).decode("utf-8")
+            _username, password = decoded.split(":", 1)
+        except (ValueError, UnicodeDecodeError):
+            return challenge
+
+        if not secrets.compare_digest(password, _UI_PASSWORD):
+            return challenge
+
         return await call_next(request)
 
     app_inst.include_router(router)

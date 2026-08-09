@@ -23,7 +23,7 @@ from quantedge.contracts import (
     TradeRecommendation,
 )
 from quantedge.errors import QuantEdgeError, ValidationError
-from quantedge import config
+from quantedge.logging import get_logger
 from quantedge.providers.registry import get_registry
 from quantedge.services import (
     chat as bot_chat,
@@ -50,6 +50,8 @@ from quantedge.services import (
     structure as st,
 )
 from quantedge.services.horizons import available_time_limits
+
+log = get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1")
 
@@ -273,10 +275,11 @@ def get_bot_memory_stats() -> dict[str, Any]:
     """Fetch memory bank performance statistics and learned DO/DONT rules."""
     try:
         from quantedge.services import memory as mem
+
         return mem.get_memory_bank_summary()
-    except Exception as e:
-        import traceback
-        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+    except Exception as exc:
+        log.exception("memory-stats lookup failed")
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
 # ------------------------------------------------------------------ #
@@ -338,8 +341,13 @@ def post_bot_chat(request: ChatRequest) -> dict[str, Any]:
     except QuantEdgeError as exc:
         raise HTTPException(status_code=503, detail=f"{exc.code}: {exc.message}") from exc
     except Exception as exc:
-        import traceback
-        raise HTTPException(status_code=500, detail={"error": str(exc), "traceback": traceback.format_exc()})
+        # No traceback in the response body: it names internal paths and can carry
+        # argument values from the failing frame. It goes to the log, which is
+        # redacted, and the caller gets the type and message only.
+        log.exception("chat request failed")
+        raise HTTPException(
+            status_code=500, detail=f"{type(exc).__name__}: {exc}"
+        ) from exc
     return reply.to_dict()
 
 
@@ -351,14 +359,21 @@ def get_time_limits() -> dict[str, list[dict[str, Any]]]:
 
 
 @router.get("/debug-db")
-def debug_db():
+def debug_db() -> dict[str, Any]:
+    """Confirm the database round-trips a trivial query.
+
+    The failure branch reports the exception type and message but not a traceback:
+    a DSN with an inline password can appear in the frames of a connection error,
+    and this endpoint is reachable from the browser.
+    """
     try:
-        from quantedge.repositories.database import get_engine
         from sqlalchemy import text
+
+        from quantedge.repositories.database import get_engine
+
         engine = get_engine()
         with engine.connect() as conn:
-            res = conn.execute(text("SELECT 1")).scalar()
-            return {"status": "ok", "result": res}
-    except Exception as e:
-        import traceback
-        return {"status": "error", "error": str(e), "traceback": traceback.format_exc()}
+            return {"status": "ok", "result": conn.execute(text("SELECT 1")).scalar()}
+    except Exception as exc:
+        log.exception("debug-db probe failed")
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}

@@ -16,6 +16,8 @@ ASCII markers only: the Windows console is cp1252 and a check mark raises.
 
 from __future__ import annotations
 
+import base64
+import os
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -35,6 +37,11 @@ from quantedge.services.memory import (
 )
 
 FAILURES: list[str] = []
+
+
+def _basic_auth(password: str, username: str = "quantedge") -> str:
+    """The Authorization header value for the UI's basic-auth gate."""
+    return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
 
 
 def check(label: str, condition: bool, detail: str = "") -> None:
@@ -155,7 +162,11 @@ def main() -> int:
     )
 
     print("\n[5] REST surface")
-    client = TestClient(app)
+    # The app is behind the basic-auth gate, so every request here carries the
+    # configured credential. Without it each route answers 401 and the checks
+    # below would be testing the gate rather than the endpoint.
+    password = os.getenv("QUANTEDGE_UI_PASSWORD", "Bot@2026")
+    client = TestClient(app, headers={"Authorization": _basic_auth(password)})
 
     res = client.post(
         "/api/v1/bot/trade-recommendation?symbol=BTCUSDT&time_limit=15%20min&asset_class=crypto"

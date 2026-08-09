@@ -21,7 +21,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from quantedge.logging import MASK, RedactingFilter, JsonFormatter, redact, register_secret
+# Imported after the path bootstrap above: this script runs from a checkout
+# without the package installed, so `src` has to be on the path first.
+from quantedge.logging import (  # noqa: E402
+    MASK,
+    JsonFormatter,
+    RedactingFilter,
+    redact,
+    register_secret,
+)
 
 FAILURES: list[str] = []
 
@@ -51,7 +59,7 @@ def _capture(msg: object, *args: object, **kw: object) -> str:
     return stream.getvalue()
 
 
-def main() -> int:  # noqa: PLR0915 - a flat list of independent control checks
+def main() -> int:
     print("=" * 70)
     print("SECURITY CONTROL VERIFICATION")
     print("=" * 70)
@@ -92,7 +100,11 @@ def main() -> int:  # noqa: PLR0915 - a flat list of independent control checks
     # placeholder unrenderable. The formatter then fell back to the raw template
     # and the numbers vanished from the log while the line still looked healthy.
     out = _capture("scan: %d candidates from %d symbols in %.1fms", 3, 14, 92.5)
-    check("integer placeholders still render", "3 candidates from 14 symbols" in out, out.strip()[-60:])
+    check(
+        "integer placeholders still render",
+        "3 candidates from 14 symbols" in out,
+        out.strip()[-60:],
+    )
     check("float placeholders still render", "92.5ms" in out)
     check("no format-string residue is emitted", "%d" not in out and "%.1f" not in out)
 
@@ -112,7 +124,11 @@ def main() -> int:  # noqa: PLR0915 - a flat list of independent control checks
         text = asset.read_text(encoding="utf-8", errors="replace")
         if any(marker in text for marker in ("sk-", "apikey=", "api_key=", "ANTHROPIC_AUTH")):
             leaked.append(asset.name)
-    check("no static asset contains a key or key-bearing URL", not leaked, ", ".join(leaked) or "none")
+    check(
+        "no static asset contains a key or key-bearing URL",
+        not leaked,
+        ", ".join(leaked) or "none",
+    )
 
     print("\n[5] Input allowlists reject what is not configured")
     from quantedge.errors import ValidationError

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import os
 import sys
 from pathlib import Path
 
@@ -10,6 +12,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from fastapi.testclient import TestClient
 
 from quantedge.api import app
+
+
+def _basic_auth(password: str, username: str = "quantedge") -> str:
+    """The Authorization header value for the UI's basic-auth gate."""
+    return "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
 
 FAILURES: list[str] = []
 
@@ -25,7 +32,12 @@ def main() -> int:
     print("FASTAPI VERIFICATION -- routes & OpenAPI schema checks")
     print("=" * 70)
 
-    client = TestClient(app)
+    # Behind the basic-auth gate: without the credential every route answers 401
+    # and these checks would be exercising the gate, not the endpoints.
+    client = TestClient(
+        app,
+        headers={"Authorization": _basic_auth(os.getenv("QUANTEDGE_UI_PASSWORD", "Bot@2026"))},
+    )
 
     # OpenAPI schema test
     schema_res = client.get("/openapi.json")

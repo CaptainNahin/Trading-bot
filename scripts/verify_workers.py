@@ -81,7 +81,7 @@ def _run_for(target: object, logger_name: str, seconds: float) -> list[logging.L
         # does not cost the full timeout.
         if any(r.levelno >= logging.ERROR for r in collector.records):
             break
-        if len(collector.records) >= 2:  # noqa: PLR2004 - startup line plus a result line
+        if len(collector.records) >= 2:
             break
         time.sleep(0.25)
 

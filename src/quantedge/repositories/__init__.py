@@ -99,6 +99,17 @@ def get_repository(*, force_memory: bool = False) -> SqlRepository | MemoryRepos
         # and create_all would drift from the migration history.
         if engine.url.get_backend_name() == "sqlite":
             create_all(engine)
+        else:
+            # Actually open a connection. ``create_engine`` is lazy, so a DSN
+            # pointing at a host that refuses connections builds an engine
+            # without complaint and only fails at the first query -- long after
+            # this function has reported the backend durable. Production is
+            # supposed to refuse an unreachable database, and it cannot refuse
+            # what it never tried to reach.
+            from sqlalchemy import text
+
+            with engine.connect() as conn:
+                conn.execute(text("SELECT 1"))
         _repository = SqlRepository()
         _mode = settings.persistence_mode
         log.info("repository ready", extra={"mode": _mode, "durable": True})

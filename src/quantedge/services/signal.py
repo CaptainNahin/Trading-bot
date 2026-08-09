@@ -284,8 +284,16 @@ def generate_best_trade_recommendation(
     time_limit_minutes: int | None = None,
     provider_name: str | None = None,
     candle_fetcher: Any = None,
+    alternatives_out: list[dict[str, Any]] | None = None,
 ) -> TradeRecommendation:
-    """Scan major symbols to find the best setup, avoiding API rate limits."""
+    """Scan major symbols to find the best setup, avoiding API rate limits.
+
+    ``alternatives_out``, when given, is filled with the other candidates the
+    sweep scored. Returning only the single top scorer made a balanced board look
+    one-directional: the DOWN setups were found, ranked and then discarded before
+    anyone saw them. The caller can now show what else was on the board without
+    paying for a second scan.
+    """
     from quantedge.services.scanner import run_scan
     from quantedge.symbols import supported_symbols
 
@@ -309,7 +317,7 @@ def generate_best_trade_recommendation(
     # above all. Keeping only the top scorer meant one candidate failing on
     # geometry was reported as "no setup on any symbol", which is a different and
     # much worse claim than the truth, and it hid setups that were ready to go.
-    scored: list[tuple[float, str, str]] = []
+    scored: list[tuple[float, str, str, str]] = []
     for hz in horizons:
         try:
             scan_res = run_scan(
@@ -318,7 +326,10 @@ def generate_best_trade_recommendation(
                 provider=provider_name or "binance",
                 candle_fetcher=candle_fetcher,
             )
-            scored.extend((c.heuristic_score, c.symbol, hz) for c in scan_res.candidates)
+            scored.extend(
+                (c.heuristic_score, c.symbol, hz, c.direction.value)
+                for c in scan_res.candidates
+            )
         except Exception as exc:
             log.warning("Scan failed for horizon %s", hz, exc_info=exc)
 
@@ -332,9 +343,10 @@ def generate_best_trade_recommendation(
     # candidate is refused the caller learns why the strongest one was refused,
     # rather than a generic "nothing found".
     first_decline: NoTradeReason | None = None
-    for _score, symbol, hz in sorted(scored, key=lambda row: row[0], reverse=True):
+    ranked = sorted(scored, key=lambda row: row[0], reverse=True)
+    for score, symbol, hz, _direction in ranked:
         try:
-            return generate_trade_recommendation(
+            rec = generate_trade_recommendation(
                 symbol=symbol,
                 time_limit=hz,
                 provider_name=provider_name,
@@ -343,6 +355,15 @@ def generate_best_trade_recommendation(
         except NoTradeReason as exc:
             if first_decline is None:
                 first_decline = exc
+            continue
+
+        if alternatives_out is not None:
+            alternatives_out.extend(
+                {"symbol": s, "horizon": h, "direction": d, "heuristic_score": sc}
+                for sc, s, h, d in ranked
+                if not (s == symbol and h == hz and sc == score)
+            )
+        return rec
 
     raise first_decline if first_decline is not None else NoTradeReason(
         SignalStatus.NO_TRADE,
