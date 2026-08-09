@@ -2,11 +2,17 @@
 
 Security boundary
 -----------------
-This module talks **only** to ``data-api.binance.vision``, Binance's
-market-data-only host. It has no signing code, no API-key header, no
-``recvWindow`` parameter and no path under ``/api/v3/order``, ``/account``,
-``/sapi``, ``/fapi`` or ``/margin``. There is deliberately no way to place an
-order, read a balance or move funds through this class, and
+This module talks only to Binance's public market-data hosts: the configured
+one, plus the mirrors it fails over to when a host refuses the deployment's
+region with HTTP 451. It has no signing code, no ``recvWindow`` parameter and
+no path under ``/api/v3/order``, ``/account``, ``/sapi``, ``/fapi`` or
+``/margin``.
+
+An ``X-MBX-APIKEY`` header is sent when a key is configured. On these endpoints
+that header buys a higher public rate limit and nothing more: every private
+Binance route *additionally* requires an HMAC ``signature`` parameter, which
+this module never computes. There is deliberately no way to place an order,
+read a balance or move funds through this class, and
 ``tests/unit/test_binance_no_private_endpoints.py`` asserts that by scanning
 the source.
 """
@@ -32,7 +38,12 @@ from quantedge.contracts import (
     Trade,
     utc_now,
 )
-from quantedge.errors import ProviderBadResponseError, QuantEdgeError, UnsupportedSymbolError
+from quantedge.errors import (
+    ProviderBadResponseError,
+    ProviderGeoBlockedError,
+    QuantEdgeError,
+    UnsupportedSymbolError,
+)
 from quantedge.logging import get_logger
 from quantedge.providers.base import MarketDataProvider
 from quantedge.providers.binance import mapping
@@ -86,12 +97,38 @@ class BinanceRestProvider(MarketDataProvider):
             },
         )
         api_key = settings.secret(settings.binance_api_key)
-        headers = {"X-MBX-APIKEY": api_key} if api_key else None
-        
-        self._client = ResilientHttpClient(
+        # Sent for the higher public rate-limit tier only. The key buys quota on
+        # the same market-data endpoints; it is never combined with a signature,
+        # so it cannot reach an order, account or wallet route even by accident.
+        self._headers = {"X-MBX-APIKEY": api_key} if api_key else None
+
+        # Alternates for HTTP 451, primary first and duplicates dropped while
+        # keeping order. Only used when a host refuses the region.
+        alternates = [
+            h.strip().rstrip("/")
+            for h in settings.binance_rest_fallback_urls.split(",")
+            if h.strip()
+        ]
+        self._hosts = list(dict.fromkeys([self._base_url, *alternates]))
+
+        self._client = self._build_client(self._base_url, api_key, defaults, rate)
+        self._breaker_cfg = breaker
+        self._symbol_cache: dict[str, SymbolInfo] = {}
+        self._symbol_cache_at: float = 0.0
+        self._symbol_cache_ttl = float(cfg.get("cache", {}).get("symbols_ttl_seconds", 3600))
+
+    def _build_client(
+        self,
+        base_url: str,
+        api_key: str | None,
+        defaults: dict[str, Any],
+        rate: dict[str, Any],
+    ) -> ResilientHttpClient:
+        """One client bound to one host, so a host swap is a fresh client."""
+        return ResilientHttpClient(
             provider=self.name,
-            base_url=self._base_url,
-            default_headers=headers,
+            base_url=base_url,
+            default_headers={"X-MBX-APIKEY": api_key} if api_key else None,
             config=HttpClientConfig(
                 timeout_seconds=float(defaults.get("timeout_seconds", 10.0)),
                 connect_timeout_seconds=float(defaults.get("connect_timeout_seconds", 5.0)),
@@ -102,10 +139,39 @@ class BinanceRestProvider(MarketDataProvider):
                 requests_per_minute=rate.get("requests_per_minute"),
             ),
         )
-        self._breaker_cfg = breaker
-        self._symbol_cache: dict[str, SymbolInfo] = {}
-        self._symbol_cache_at: float = 0.0
-        self._symbol_cache_ttl = float(cfg.get("cache", {}).get("symbols_ttl_seconds", 3600))
+
+    async def _get_json(self, path: str, **kw: Any) -> Any:
+        """GET with host failover on a regional refusal.
+
+        Every call routes through here so a geo-blocked deployment recovers on
+        the first request rather than needing a redeploy with a different
+        ``BINANCE_REST_BASE_URL``. Only 451 triggers a swap: a timeout or a 5xx
+        is the host's problem and the retry loop already owns it, whereas a
+        refusal is permanent for this region and no amount of retrying helps.
+        The working host is kept so the cost is paid once, not per request.
+        """
+        settings = get_settings()
+        api_key = settings.secret(settings.binance_api_key)
+        cfg = providers_config()
+        defaults = cfg.get("defaults", {})
+        rate = cfg.get("providers", {}).get("binance", {}).get("rate_limit", {})
+
+        last: ProviderGeoBlockedError | None = None
+        for host in self._hosts:
+            if host != self._base_url:
+                log.warning(
+                    "Binance host refused this region; trying %s",
+                    host,
+                    extra={"previous_host": self._base_url},
+                )
+                await self._client.aclose()
+                self._client = self._build_client(host, api_key, defaults, rate)
+                self._base_url = host
+            try:
+                return await self._client.get_json(path, **kw)
+            except ProviderGeoBlockedError as exc:
+                last = exc
+        raise last or ProviderGeoBlockedError(self.name, "every configured host refused")
 
     # ------------------------------------------------------------------ #
     # identity / health                                                  #
@@ -140,7 +206,7 @@ class BinanceRestProvider(MarketDataProvider):
 
         started = time.perf_counter()
         try:
-            await self._client.get_json("/api/v3/ping", dedupe=False)
+            await self._get_json("/api/v3/ping", dedupe=False)
             latency_ms = (time.perf_counter() - started) * 1000.0
             return ProviderHealth(
                 provider=self.name,
@@ -205,7 +271,7 @@ class BinanceRestProvider(MarketDataProvider):
         age = time.monotonic() - self._symbol_cache_at
         if not force and self._symbol_cache and age < self._symbol_cache_ttl:
             return
-        payload = await self._client.get_json("/api/v3/exchangeInfo")
+        payload = await self._get_json("/api/v3/exchangeInfo")
         if not isinstance(payload, dict) or "symbols" not in payload:
             raise ProviderBadResponseError(self.name, "exchangeInfo missing 'symbols'")
         cache: dict[str, SymbolInfo] = {}
@@ -238,10 +304,10 @@ class BinanceRestProvider(MarketDataProvider):
     async def get_quote(self, symbol: str) -> Quote:
         """24h ticker enriched with best bid/ask from bookTicker."""
         canonical = normalize_symbol(symbol)
-        ticker = await self._client.get_json("/api/v3/ticker/24hr", params={"symbol": canonical})
+        ticker = await self._get_json("/api/v3/ticker/24hr", params={"symbol": canonical})
         book: dict[str, Any] | None = None
         try:
-            book_raw = await self._client.get_json(
+            book_raw = await self._get_json(
                 "/api/v3/ticker/bookTicker", params={"symbol": canonical}
             )
             if isinstance(book_raw, dict):
@@ -259,7 +325,7 @@ class BinanceRestProvider(MarketDataProvider):
     async def get_price(self, symbol: str) -> Quote:
         """Lightweight ``/ticker/price`` lookup (last trade price only)."""
         canonical = normalize_symbol(symbol)
-        raw = await self._client.get_json("/api/v3/ticker/price", params={"symbol": canonical})
+        raw = await self._get_json("/api/v3/ticker/price", params={"symbol": canonical})
         if not isinstance(raw, dict) or "price" not in raw:
             raise ProviderBadResponseError(self.name, "ticker/price missing 'price'")
         return Quote(
@@ -273,7 +339,7 @@ class BinanceRestProvider(MarketDataProvider):
     async def get_book_ticker(self, symbol: str) -> Quote:
         """Best bid/ask with a real spread."""
         canonical = normalize_symbol(symbol)
-        raw = await self._client.get_json("/api/v3/ticker/bookTicker", params={"symbol": canonical})
+        raw = await self._get_json("/api/v3/ticker/bookTicker", params={"symbol": canonical})
         if not isinstance(raw, dict):
             raise ProviderBadResponseError(self.name, "bookTicker returned a non-object")
         return mapping.normalize_book_ticker_event({**raw, "s": canonical})
@@ -307,7 +373,7 @@ class BinanceRestProvider(MarketDataProvider):
         interval = mapping.to_binance_interval(timeframe)
         # Request one extra bar because the newest one is typically still forming.
         limit = min(count + 1, 1000)
-        raw = await self._client.get_json(
+        raw = await self._get_json(
             "/api/v3/klines",
             params={"symbol": canonical, "interval": interval, "limit": limit},
         )
@@ -331,7 +397,7 @@ class BinanceRestProvider(MarketDataProvider):
         dropped rather than producing a misaligned candle.
         """
         needed_5m = min((count + 1) * 2, 1000)
-        raw = await self._client.get_json(
+        raw = await self._get_json(
             "/api/v3/klines",
             params={"symbol": symbol, "interval": "5m", "limit": needed_5m},
         )
@@ -408,7 +474,7 @@ class BinanceRestProvider(MarketDataProvider):
         # Binance only accepts specific limit values; round up to the next valid one.
         valid = (5, 10, 20, 50, 100, 500, 1000)
         limit = next((v for v in valid if v >= depth), 100)
-        raw = await self._client.get_json(
+        raw = await self._get_json(
             "/api/v3/depth", params={"symbol": canonical, "limit": limit}
         )
         book = mapping.normalize_depth(raw, canonical)
@@ -423,7 +489,7 @@ class BinanceRestProvider(MarketDataProvider):
     async def get_recent_trades(self, symbol: str, limit: int = 100) -> list[Trade]:
         canonical = normalize_symbol(symbol)
         limit = enforce_limit(limit, "max_recent_trades", "limit")
-        raw = await self._client.get_json(
+        raw = await self._get_json(
             "/api/v3/trades", params={"symbol": canonical, "limit": min(limit, 1000)}
         )
         if not isinstance(raw, list):
@@ -436,7 +502,7 @@ class BinanceRestProvider(MarketDataProvider):
 
     async def get_server_time(self) -> datetime:
         """Binance server clock, used to measure our own clock skew."""
-        raw = await self._client.get_json("/api/v3/time", dedupe=False)
+        raw = await self._get_json("/api/v3/time", dedupe=False)
         if not isinstance(raw, dict) or "serverTime" not in raw:
             raise ProviderBadResponseError(self.name, "time payload missing 'serverTime'")
         return datetime.fromtimestamp(int(raw["serverTime"]) / 1000.0, tz=UTC)

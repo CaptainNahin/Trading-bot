@@ -34,6 +34,7 @@ from quantedge.errors import (
     ProviderAuthError,
     ProviderBadResponseError,
     ProviderError,
+    ProviderGeoBlockedError,
     ProviderRateLimitError,
     ProviderTimeoutError,
     ProviderUnavailableError,
@@ -579,6 +580,16 @@ class ResilientHttpClient:
             return ProviderAuthError(
                 self.provider,
                 "endpoint requires a paid plan (HTTP 402)",
+            )
+        if status == 451:
+            # Geographic restriction, not a credential or transport problem.
+            # Retrying is pointless from the same egress IP and a bare
+            # "unexpected HTTP 451" sent operators looking for a broken key, so
+            # the cause is named here and the host is included: the fix is a
+            # different host or region, and nothing about the request changes it.
+            return ProviderGeoBlockedError(
+                self.provider,
+                f"host {response.request.url.host} refuses this region (HTTP 451)",
             )
         if 500 <= status < 600:
             return ProviderUnavailableError(self.provider, f"provider error HTTP {status}")

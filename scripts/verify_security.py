@@ -161,8 +161,22 @@ def main() -> int:
               str(value))
 
     print("\n[7] Binance surface is public market data only")
+    # ``X-MBX-APIKEY`` is deliberately *not* on this list. That header raises the
+    # public rate limit and cannot by itself reach a private route: every signed
+    # Binance endpoint additionally requires an HMAC ``signature`` parameter, so
+    # the signing code and the private paths are what actually gate access, and
+    # those are what is asserted absent here.
     binance = (ROOT / "src" / "quantedge" / "providers").rglob("binance*.py")
-    private_markers = ("/api/v3/order", "/api/v3/account", "/sapi/", "signature=", "X-MBX-APIKEY")
+    private_markers = (
+        "/api/v3/order",
+        "/api/v3/account",
+        "/api/v3/myTrades",
+        "/sapi/",
+        "/fapi/",
+        "signature=",
+        "hmac",
+        "recvWindow",
+    )
     offenders: list[str] = []
     for module in binance:
         text = module.read_text(encoding="utf-8")

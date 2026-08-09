@@ -257,6 +257,22 @@ class ProviderUnavailableError(ProviderError):
         super().__init__(message, retryable=True, provider=provider)
 
 
+class ProviderGeoBlockedError(ProviderError):
+    """Provider refuses this egress region (HTTP 451).
+
+    Not retryable: the request is well-formed and the credential is fine, so
+    repeating it from the same IP produces the same refusal. Only a different
+    host or a different region changes the answer, which is why this is its own
+    class rather than an unavailability the retry loop would keep hammering.
+    """
+
+    code = ErrorCode.PROVIDER_UNAVAILABLE
+    http_status = 502
+
+    def __init__(self, provider: str, message: str) -> None:
+        super().__init__(message, retryable=False, provider=provider)
+
+
 class ProviderBadResponseError(ProviderError):
     """Provider returned a payload we cannot trust or parse.
 

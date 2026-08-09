@@ -43,6 +43,21 @@ CONFIG_DIR = PROJECT_ROOT / "config"
 AppEnv = Literal["development", "staging", "production"]
 LLMProviderName = Literal["agentrouter", "anthropic", "disabled"]
 
+# Binance REST hosts this gateway may talk to. All serve the same public
+# market-data API; the allowlist exists so a typo or an edited environment
+# cannot point the client at an arbitrary host, and it applies to the failover
+# list as well as the primary.
+_BINANCE_ALLOWED_HOSTS = (
+    "data-api.binance.vision",
+    "testnet.binance.vision",
+    "api.binance.com",
+    "api-gcp.binance.com",
+    "api1.binance.com",
+    "api2.binance.com",
+    "api3.binance.com",
+    "api4.binance.com",
+)
+
 
 class Settings(BaseSettings):
     """Environment-backed settings.
@@ -96,6 +111,14 @@ class Settings(BaseSettings):
 
     # ---- Binance (public market data only) ----
     binance_rest_base_url: str = "https://data-api.binance.vision"
+    # Hosts tried in order when the configured one answers HTTP 451. Binance
+    # geo-blocks some datacenter regions, so a deployment can be refused by the
+    # primary host while the same key and code work locally -- that is what the
+    # single-host build reported as a bare provider error. All four serve the
+    # same public market-data API; none accepts an order or exposes an account.
+    binance_rest_fallback_urls: str = (
+        "https://data-api.binance.vision,https://api-gcp.binance.com,https://api1.binance.com"
+    )
     binance_ws_base_url: str = "wss://stream.binance.com:9443"
     binance_stream_symbols: str = "BTCUSDT,ETHUSDT,BNBUSDT,SOLUSDT,XRPUSDT"
     binance_stream_intervals: str = "1m,5m"
@@ -123,13 +146,28 @@ class Settings(BaseSettings):
     @field_validator("binance_rest_base_url")
     @classmethod
     def _market_data_only_host(cls, v: str) -> str:
-        """Refuse a Binance REST host that permits signed/private endpoints unless specified."""
-        allowed = ("data-api.binance.vision", "testnet.binance.vision", "api.binance.com", "api1.binance.com", "api2.binance.com", "api3.binance.com", "api4.binance.com")
-        if not any(host in v for host in allowed):
+        """Refuse a Binance REST host that is not on the allowlist."""
+        if not any(host in v for host in _BINANCE_ALLOWED_HOSTS):
             raise ValueError(
                 "BINANCE_REST_BASE_URL must be a permitted host "
-                f"({' or '.join(allowed)}); refusing '{v}'"
+                f"({' or '.join(_BINANCE_ALLOWED_HOSTS)}); refusing '{v}'"
             )
+        return v
+
+    @field_validator("binance_rest_fallback_urls")
+    @classmethod
+    def _fallbacks_on_allowlist(cls, v: str) -> str:
+        """Every failover host faces the same allowlist as the primary.
+
+        Failover would otherwise be a way around the check above: a rejected
+        host could not be set as the primary but could be reached by listing it
+        here and letting one 451 promote it.
+        """
+        for host in (h.strip() for h in v.split(",")):
+            if host and not any(allowed in host for allowed in _BINANCE_ALLOWED_HOSTS):
+                raise ValueError(
+                    f"BINANCE_REST_FALLBACK_URLS contains a non-permitted host: '{host}'"
+                )
         return v
 
     @model_validator(mode="after")
