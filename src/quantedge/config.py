@@ -41,7 +41,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 
 AppEnv = Literal["development", "staging", "production"]
-LLMProviderName = Literal["agentrouter", "anthropic", "disabled"]
+LLMProviderName = Literal["agentrouter", "anthropic", "gemini", "disabled"]
 
 # Binance REST hosts this gateway may talk to. All serve the same public
 # market-data API; the allowlist exists so a typo or an edited environment
@@ -108,6 +108,8 @@ class Settings(BaseSettings):
     agentrouter_model: str | None = None
     anthropic_api_key: SecretStr | None = None
     anthropic_model: str = "claude-sonnet-4-5"
+    gemini_api_key: SecretStr | None = None
+    gemini_model: str = "gemini-3.1-pro-preview"
 
     # ---- Binance (public market data only) ----
     binance_rest_base_url: str = "https://data-api.binance.vision"
@@ -254,6 +256,7 @@ class Settings(BaseSettings):
             "CALENDAR_API_KEY": self.secret(self.calendar_api_key) is not None,
             "AGENTROUTER_API_KEY": self.secret(self.agentrouter_api_key) is not None,
             "ANTHROPIC_API_KEY": self.secret(self.anthropic_api_key) is not None,
+            "GEMINI_API_KEY": self.secret(self.gemini_api_key) is not None,
             "DATABASE_URL": self.secret(self.database_url) is not None,
             "SUPABASE_SERVICE_ROLE_KEY": self.secret(self.supabase_service_role_key) is not None,
         }

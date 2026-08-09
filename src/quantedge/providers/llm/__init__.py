@@ -7,11 +7,13 @@ from quantedge.logging import get_logger
 from quantedge.providers.llm.agentrouter import AgentRouterLLMProvider
 from quantedge.providers.llm.anthropic import AnthropicLLMProvider
 from quantedge.providers.llm.base import BaseLLMProvider
+from quantedge.providers.llm.gemini import GeminiLLMProvider
 
 __all__ = [
     "AgentRouterLLMProvider",
     "AnthropicLLMProvider",
     "BaseLLMProvider",
+    "GeminiLLMProvider",
     "default_llm_provider",
 ]
 
@@ -41,6 +43,8 @@ def default_llm_provider() -> BaseLLMProvider | None:
         provider = AgentRouterLLMProvider()
     elif name == "anthropic":
         provider = AnthropicLLMProvider()
+    elif name == "gemini":
+        provider = GeminiLLMProvider()
     else:  # pragma: no cover - Settings restricts the literal
         log.warning("unknown LLM_PROVIDER; reviews disabled", extra={"configured": name})
         return None
