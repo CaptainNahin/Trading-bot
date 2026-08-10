@@ -109,7 +109,19 @@ def generate_signal_decision(
         _persist(repo, decision)
         return decision
 
-    context = build_signal_context(candidate, quality)
+    # Hand over the analysis the scan already did. Calling this with only the
+    # candidate and the quality report meant the reviewer was told, on every
+    # request, that the multi-timeframe snapshot and the regime report were "not
+    # available" -- while the scan had just computed both to decide the direction
+    # it was being asked to review. The reviewer then correctly reported a thin
+    # evidence base and declined, so the review looked like caution when it was
+    # really a plumbing gap.
+    context = build_signal_context(
+        candidate,
+        quality,
+        multi_timeframe=scan.mtf_snapshots.get(symbol),
+        regime=scan.regime_reports.get(symbol),
+    )
 
     provider = llm_provider if llm_provider is not None else _default_llm_provider()
     validated = None

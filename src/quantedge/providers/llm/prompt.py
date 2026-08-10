@@ -68,14 +68,51 @@ fields are arrays of short strings. Timestamps are ISO 8601 with a UTC offset.
 Any key not on this list will cause the response to be rejected."""
 
 
+# Structure events per timeframe view kept in the prompt, most recent first.
+# The full history runs to 60 per view and 180 across the stack -- roughly 34k
+# tokens of mostly-superseded pivots, which crowds out the current state the
+# review is actually about and costs real money on every call. Twelve covers
+# the recent BOS/CHoCH sequence; anything older is summarised by the structure
+# label and the swing lists, which are kept whole.
+_MAX_STRUCTURE_EVENTS = 12
+
+
+def _trim_structure_events(payload: dict[str, Any]) -> dict[str, Any]:
+    """Keep the most recent structure events per view, note what was dropped.
+
+    Truncating silently would be the worse failure: the model would read a
+    shortened history as the whole history and reason about a market that had
+    apparently done nothing before those bars. The count that was removed is
+    stated so a thin event list is distinguishable from a quiet market.
+    """
+    mtf = payload.get("multi_timeframe")
+    if not isinstance(mtf, dict):
+        return payload
+    for view in mtf.get("views") or []:
+        structure = view.get("structure") if isinstance(view, dict) else None
+        if not isinstance(structure, dict):
+            continue
+        events = structure.get("events")
+        if isinstance(events, list) and len(events) > _MAX_STRUCTURE_EVENTS:
+            dropped = len(events) - _MAX_STRUCTURE_EVENTS
+            structure["events"] = events[-_MAX_STRUCTURE_EVENTS:]
+            structure["events_truncated"] = (
+                f"{dropped} older structure events omitted from this prompt; "
+                f"showing the most recent {_MAX_STRUCTURE_EVENTS}"
+            )
+    return payload
+
+
 def build_user_prompt(context: SignalContext) -> str:
     """Serialise the verified context as the model's only source of fact.
 
     The payload is the contract's own JSON dump rather than a prose summary, so
     what the model reviews is exactly what the pipeline computed and persisted --
-    a hand-written summary could omit a contradiction or round a level.
+    a hand-written summary could omit a contradiction or round a level. The one
+    reduction is the structure event history, trimmed to the recent window and
+    labelled with how much was left out.
     """
-    payload = context.model_dump(mode="json", exclude_none=True)
+    payload = _trim_structure_events(context.model_dump(mode="json", exclude_none=True))
     return (
         "Review this verified market context and reply with the JSON object.\n\n"
         f"```json\n{json.dumps(payload, indent=2, sort_keys=True)}\n```\n\n"

@@ -17,6 +17,8 @@ from quantedge.contracts import (
     Candle,
     DataQualityReport,
     EventRiskStatus,
+    MultiTimeframeSnapshot,
+    RegimeReport,
     ScanCandidate,
     ScanRejection,
     ScanResult,
@@ -165,6 +167,11 @@ def run_scan(
     # Keyed by symbol, kept whatever the outcome: a caller needs to distinguish
     # "the data was unusable" from "the setup was not there".
     quality_reports: dict[str, DataQualityReport] = {}
+    # The analysis behind the verdict, kept for the same reason. These are the
+    # inputs the LLM reviewer needs; discarding them here meant the reviewer was
+    # told they did not exist.
+    mtf_snapshots: dict[str, MultiTimeframeSnapshot] = {}
+    regime_reports: dict[str, RegimeReport] = {}
 
     horizon = normalize_horizon(horizon)
     timeframe_map = mtf.get_horizon_timeframes(horizon)
@@ -354,6 +361,7 @@ def run_scan(
             bb_width_history=bb_history,
             atr_history=atr_history,
         )
+        regime_reports[symbol] = regime_report
 
         # Step 7: Multi-timeframe views & Alignment
         conf_quality = qual.evaluate_quality(
@@ -391,6 +399,7 @@ def run_scan(
             conf_struct=conf_struct,
             reg_struct=reg_struct,
         )
+        mtf_snapshots[symbol] = mtf_snapshot
 
         # Step 8: Directional Bias Determination
         direction = mtf_snapshot.aligned_direction
@@ -552,6 +561,8 @@ def run_scan(
         candidates=candidates,
         rejections=rejections,
         quality_reports=quality_reports,
+        mtf_snapshots=mtf_snapshots,
+        regime_reports=regime_reports,
         scanner_version=SCANNER_VERSION,
         warnings=warnings,
     )

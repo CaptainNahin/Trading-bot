@@ -459,6 +459,19 @@ class ScanResult(_Model):
     "the data was too poor to judge" and "the setup was not there" are different
     answers. Downstream callers report that verdict instead of inferring one
     from the candidate's score.
+
+    ``mtf_snapshots`` and ``regime_reports`` follow the same rule for the
+    analysis the scan already performed. The scan computes both to reach a
+    verdict and used to discard them on the way out, which left the LLM reviewer
+    to be told the multi-timeframe snapshot and the regime report were "not
+    available" on every single call -- for work that had just been done a few
+    lines earlier. A reviewer told its evidence is missing declines, and it was
+    right to.
+
+    There is deliberately no ``session_states`` here. Nothing in this codebase
+    measures order-book depth or session liquidity, so the field would have to be
+    filled by assertion; the scan reports crypto liquidity as ``continuous``
+    precisely to avoid claiming a measurement it never took.
     """
 
     horizon: str
@@ -467,6 +480,8 @@ class ScanResult(_Model):
     candidates: list[ScanCandidate] = Field(default_factory=list)
     rejections: list[ScanRejection] = Field(default_factory=list)
     quality_reports: dict[str, DataQualityReport] = Field(default_factory=dict)
+    mtf_snapshots: dict[str, MultiTimeframeSnapshot] = Field(default_factory=dict)
+    regime_reports: dict[str, RegimeReport] = Field(default_factory=dict)
     generated_at_utc: datetime = Field(default_factory=utc_now)
     scanner_version: str
     warnings: list[str] = Field(default_factory=list)
