@@ -427,14 +427,27 @@ def run_scan(
         agreement_score = mtf_snapshot.alignment_score
 
         if agreement_score < min_agreement:
+            # Two different failures land here and the message has to say which.
+            # A conflict means the views pointed opposite ways; no conflict means
+            # they simply did not all speak, and reporting that as "timeframes
+            # disagree" describes a fight that never happened -- the reader then
+            # looks for an opposing trend that is not there.
+            if mtf_snapshot.conflicts:
+                cause = "; ".join(mtf_snapshot.conflicts)
+            elif mtf_snapshot.abstaining_roles:
+                cause = (
+                    f"no conflict, but only part of the stack carries a direction; "
+                    f"abstaining: {', '.join(mtf_snapshot.abstaining_roles)}"
+                )
+            else:
+                cause = "no timeframe carries a direction"
             rejections.append(
                 ScanRejection(
                     symbol=symbol,
                     reason_code="WEAK_EVIDENCE_AGREEMENT",
                     reason=(
                         f"Multi-timeframe agreement {round(agreement_score, 4)} is below "
-                        f"minimum {min_agreement}: "
-                        f"{'; '.join(mtf_snapshot.conflicts) or 'timeframes disagree'}"
+                        f"minimum {min_agreement}: {cause}"
                     ),
                     stage="AGREEMENT_GATE",
                 )

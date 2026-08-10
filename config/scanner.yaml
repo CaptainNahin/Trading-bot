@@ -49,13 +49,18 @@ gates:
   require_closed_candles: true               # forming candle never scored
   min_evidence_agreement_score: 0.50
   # Agreement is measured only over timeframes that carry a direction; ranging
-  # and uncertain views abstain rather than counting as disagreement. This is
-  # the quorum that keeps that renormalisation honest: at least this share of
-  # the usable timeframe weight must have voted. At 0.75 the execution view
-  # (0.25) plus either the confirmation view (0.35) or the regime view (0.40)
-  # is no longer enough on its own -- a setup needs the confirmation and regime
-  # views to agree with execution, which is the condition the agreement score
-  # above is then measured over.
+  # and uncertain views abstain rather than counting as disagreement. The score
+  # above is the share of the *usable* timeframe weight that agreed, so with
+  # weights execution 0.25 / confirmation 0.35 / regime 0.40 the 0.50 gate means
+  # no single view can carry a setup on its own: the smallest passing
+  # combination is execution + confirmation (0.60), and any two views agreeing
+  # clears it while one never does.
+  #
+  # This floor is the separate question of whether enough of the stack was
+  # usable at all. It sits below the agreement gate deliberately: a setup that
+  # fails here failed for a different reason (views lost to data quality) than
+  # one that fails the gate above (views present but silent or opposed), and the
+  # rejection message names which.
   min_timeframe_participation: 0.25
 
 # Deterministic evidence weights. Sum of absolute weights is normalized.
@@ -108,14 +113,30 @@ structure:
 output:
   default_limit: 3
   max_limit: 10
-  min_heuristic_score_to_return: 0.20
+  # Derived from the composite weights, not picked. A candidate reaching this
+  # line has already cleared every gate above, which pins three of the five
+  # inputs near their maxima: volatility is an in-band filter that reads 1.0
+  # whenever the tape is tradeable (0.15), data quality is >= 0.75 (0.075) and
+  # agreement is >= 0.50 (0.05). So the lowest score any surviving candidate can
+  # carry is about 0.275 even with trend and momentum at exactly zero -- which
+  # is why 0.20 rejected nothing at all and simply looked like a filter.
+  #
+  # 0.60 is 0.275 plus half the combined trend+momentum weight (0.65 * 0.5),
+  # i.e. "at least half the directional evidence is actually present". That is a
+  # selectivity choice and nothing more: it changes how much agreement is
+  # required before a setup is shown, not how often the shown ones are right.
+  min_heuristic_score_to_return: 0.60
   include_rejections: true
   max_rejections_returned: 25
 
 # LLM escalation. The LLM is expensive and is NOT called per tick.
 llm_escalation:
   enabled: true
-  min_heuristic_score: 0.20        # only strong deterministic candidates escalate
+  # Matched to the return threshold above. Below it the candidate is not shown,
+  # so reviewing it spends a call on an answer nobody sees; above it, every
+  # candidate that reaches a user has been reviewed. It must never sit higher
+  # than the return threshold or returned candidates would ship unreviewed.
+  min_heuristic_score: 0.60
   max_calls_per_scan: 2
   min_seconds_between_calls_per_symbol: 300
   require_quality_status: [PASS]   # DEGRADED never escalates

@@ -1,0 +1,544 @@
+import sys
+import os
+import threading
+import time
+import json
+
+try:
+    from openai import OpenAI
+except ImportError:
+    print("Error: The 'openai' library is required to run this script.")
+    print("Please install it by running: pip install openai")
+    sys.exit(1)
+
+# Configuration
+BASE_URL = "https://freemodelsforall.hopto.org/v1"
+API_KEY = "API_KEY"
+
+# ANSI Escape Sequences for Terminal Styling
+COLOR_RESET = "\033[0m"
+COLOR_USER = "\033[1;35m"      # Bold Magenta
+COLOR_AI = "\033[1;36m"        # Bold Cyan
+COLOR_SYSTEM = "\033[90m"      # Dark Gray
+COLOR_HEADER = "\033[1;95m"    # Bright Magenta
+COLOR_ERROR = "\033[1;31m"     # Bold Red
+COLOR_TOOL = "\033[1;33m"      # Bold Yellow
+
+# Available Models Registry Fallback (if server fetch fails)
+FALLBACK_MODELS = [
+    ("Claude Fable 5", "obsidianx/custom/claude-fable-5"),
+    ("Gpt 5 4", "obsidianx/openai/gpt-5-4"),
+    ("Gpt 5 5", "obsidianx/openai/gpt-5-5"),
+    ("Gpt 5 6 Luna", "obsidianx/openai/gpt-5-6-luna"),
+    ("Gpt 5 6 Terra", "obsidianx/openai/gpt-5-6-terra"),
+    ("Gpt 5.6", "obsidianx/openai/gpt-5.6"),
+    ("Gpt 5.6 Sol", "Obsidianx/openai/gpt 5.6 Sol"),
+    ("Claude Opus 4 7", "obsidianx/custom/claude-opus-4-7"),
+    ("Claude Opus 4 8", "obsidianx/custom/claude-opus-4-8"),
+    ("Claude Opus 5", "obsidianx/custom/claude-opus-5"),
+    ("Claude Sonnet 5", "obsidianx/custom/claude-sonnet-5"),
+    ("DeepSeek V4 Flash 0731", "obsidianx/openai/DeepSeek-V4-Flash-0731"),
+    ("Deepseek V4 Flash Free", "obsidianx/openai/deepseek-v4-flash-free"),
+    ("Deepseek V4 Pro", "obsidianx/openai/deepseek-v4-pro"),
+    ("Gemini 3 1 Pro", "obsidianx/custom/gemini-3-1-pro"),
+    ("Gemini 3 Flash", "obsidianx/custom/gemini-3-flash"),
+    ("Gemini 3 Pro", "obsidianx/custom/gemini-3-pro"),
+    ("Glm 5 2", "obsidianx/custom/glm-5-2"),
+    ("Grok 4 5", "obsidianx/custom/grok-4-5"),
+    ("Laguna S 2.1 Free", "obsidianx/custom/laguna-s-2.1-free"),
+    ("Ling 3.0 Flash Free", "obsidianx/custom/ling-3.0-flash-free"),
+    ("Longcat 2.0 Free", "obsidianx/custom/longcat-2.0-free"),
+    ("Mimo V2.5 Free", "obsidianx/custom/mimo-v2.5-free"),
+    ("Nemotron 3 Ultra Free", "obsidianx/custom/nemotron-3-ultra-free"),
+    ("North Mini Code Free", "obsidianx/custom/north-mini-code-free")
+]
+
+# Tool Definitions for Agent Function Calling
+TOOLS_SCHEMA = [
+    {
+        "type": "function",
+        "function": {
+            "name": "write_file",
+            "description": "Create or overwrite a file with the specified text content.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "The path of the file to create or overwrite."},
+                    "content": {"type": "string", "description": "The content string to write into the file."}
+                },
+                "required": ["filepath", "content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_file",
+            "description": "Delete a file from the local file system.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "The file path to delete."}
+                },
+                "required": ["filepath"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_file",
+            "description": "Read the contents of a file from the local file system.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filepath": {"type": "string", "description": "The path of the file to read."}
+                },
+                "required": ["filepath"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_directory",
+            "description": "List the files and folders in a directory path.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "directory": {"type": "string", "description": "The directory path to inspect. Defaults to current path.", "default": "."}
+                }
+            }
+        }
+    }
+]
+
+class Spinner:
+    def __init__(self, message="Thinking..."):
+        self.message = message
+        self.spinner_chars = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self.stop_running = threading.Event()
+        self.thread = None
+
+    def _spin(self):
+        idx = 0
+        while not self.stop_running.is_set():
+            sys.stdout.write(f"\r{COLOR_AI}{self.spinner_chars[idx]} {self.message}{COLOR_RESET}")
+            sys.stdout.flush()
+            idx = (idx + 1) % len(self.spinner_chars)
+            time.sleep(0.08)
+        sys.stdout.write("\r" + " " * (len(self.message) + 4) + "\r")
+        sys.stdout.flush()
+
+    def start(self):
+        self.stop_running.clear()
+        self.thread = threading.Thread(target=self._spin, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        if self.thread:
+            self.stop_running.set()
+            self.thread.join()
+
+def execute_tool(name, arguments_str):
+    try:
+        args = json.loads(arguments_str) if arguments_str.strip() else {}
+    except Exception as e:
+        return f"Error: Failed to parse arguments JSON: {e}"
+
+    if name == "write_file":
+        filepath = args.get("filepath")
+        content = args.get("content", "")
+        if not filepath:
+            return "Error: Missing required argument 'filepath'."
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(content)
+            return f"Success: File successfully written to '{filepath}' ({len(content)} chars)."
+        except Exception as e:
+            return f"Error writing file: {e}"
+
+    elif name == "delete_file":
+        filepath = args.get("filepath")
+        if not filepath:
+            return "Error: Missing required argument 'filepath'."
+        try:
+            if os.path.exists(filepath):
+                os.remove(filepath)
+                return f"Success: File '{filepath}' successfully deleted."
+            else:
+                return f"Error: File '{filepath}' not found."
+        except Exception as e:
+            return f"Error deleting file: {e}"
+
+    elif name == "read_file":
+        filepath = args.get("filepath")
+        if not filepath:
+            return "Error: Missing required argument 'filepath'."
+        try:
+            if os.path.exists(filepath):
+                with open(filepath, "r", encoding="utf-8") as f:
+                    content = f.read()
+                return content
+            else:
+                return f"Error: File '{filepath}' not found."
+        except Exception as e:
+            return f"Error reading file: {e}"
+
+    elif name == "list_directory":
+        directory = args.get("directory", ".")
+        try:
+            if os.path.exists(directory) and os.path.isdir(directory):
+                files = os.listdir(directory)
+                return json.dumps(files, indent=2)
+            else:
+                return f"Error: Directory '{directory}' not found."
+        except Exception as e:
+            return f"Error listing directory: {e}"
+
+    else:
+        return f"Error: Unknown function name '{name}'."
+
+def clear_screen():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+def load_api_key():
+    # 1. Try env variable
+    token = os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if token:
+        return token
+    
+    # 2. Try loading from local .env
+    if os.path.exists(".env"):
+        with open(".env", "r") as f:
+            for line in f:
+                if line.startswith("API_KEY="):
+                    return line.split("=", 1)[1].strip()
+
+    # 3. Check hardcoded Configuration
+    if API_KEY and not API_KEY.startswith("sk-gtw-placeholder"):
+        return API_KEY
+        
+    return None
+
+def save_api_key(key):
+    with open(".env", "w") as f:
+        f.write(f"API_KEY={key}\n")
+
+def get_available_models(client):
+    try:
+        response = client.models.list()
+        models = [m.id for m in response.data]
+        return sorted(models)
+    except Exception as e:
+        if "401" in str(e) or "unauthorized" in str(e).lower():
+            raise PermissionError("Unauthorized")
+        raise e
+
+def setup_client_and_models():
+    token = load_api_key()
+    
+    while True:
+        if not token:
+            print(f"{COLOR_SYSTEM}No API key detected.{COLOR_RESET}")
+            token = input("Enter your API Key (starting with sk-gtw-): ").strip()
+            if not token:
+                print(f"{COLOR_ERROR}API Key is required.{COLOR_RESET}")
+                sys.exit(1)
+            save_api_key(token)
+            
+        client = OpenAI(
+            base_url=BASE_URL,
+            api_key=token,
+        )
+        
+        spinner = Spinner("Connecting to gateway and fetching active models...")
+        spinner.start()
+        
+        try:
+            model_ids = get_available_models(client)
+            spinner.stop()
+            return client, model_ids, token
+        except PermissionError:
+            spinner.stop()
+            print(f"\n{COLOR_ERROR}Error: The API key is invalid or expired (401 Unauthorized).{COLOR_RESET}")
+            token = None # Clear and prompt in next loop
+            # Remove invalid env key if cached in file
+            if os.path.exists(".env"):
+                try: os.remove(".env")
+                except: pass
+        except Exception as e:
+            spinner.stop()
+            print(f"\n{COLOR_ERROR}Error connecting to gateway: {e}{COLOR_RESET}")
+            print(f"{COLOR_SYSTEM}Falling back to hardcoded models list.{COLOR_RESET}\n")
+            model_ids = [m[1] for m in FALLBACK_MODELS]
+            return client, model_ids, token
+
+def select_model(model_ids):
+    print(f"{COLOR_HEADER}Available Models on Gateway:{COLOR_RESET}")
+    # Print in two columns for compact representation
+    half = (len(model_ids) + 1) // 2
+    for i in range(half):
+        col1_idx = i
+        col2_idx = i + half
+        
+        name1 = model_ids[col1_idx]
+        col1_str = f"[{col1_idx + 1:2d}] {name1}"
+        
+        if col2_idx < len(model_ids):
+            name2 = model_ids[col2_idx]
+            col2_str = f"[{col2_idx + 1:2d}] {name2}"
+            print(f" {COLOR_SYSTEM}{col1_str:<46}{col2_str}{COLOR_RESET}")
+        else:
+            print(f" {COLOR_SYSTEM}{col1_str}{COLOR_RESET}")
+            
+    print(f"{COLOR_HEADER}--------------------------------------------------{COLOR_RESET}")
+    
+    # Attempt to locate standard default model
+    default_idx = 0
+    for idx, mid in enumerate(model_ids):
+        if "claude-opus-5" in mid.lower() or "opus-5" in mid.lower():
+            default_idx = idx
+            break
+            
+    default_name = model_ids[default_idx]
+    
+    while True:
+        try:
+            choice = input(f"Select model index (1-{len(model_ids)}) [Default: {default_idx + 1} - {default_name}]: ").strip()
+            if not choice:
+                return model_ids[default_idx]
+            selected_idx = int(choice) - 1
+            if 0 <= selected_idx < len(model_ids):
+                return model_ids[selected_idx]
+            else:
+                print(f"{COLOR_ERROR}Please enter a number between 1 and {len(model_ids)}.{COLOR_RESET}")
+        except ValueError:
+            print(f"{COLOR_ERROR}Invalid input. Please enter a valid number.{COLOR_RESET}")
+
+def main():
+    clear_screen()
+    print(f"{COLOR_HEADER}=================================================={COLOR_RESET}")
+    print(f"{COLOR_HEADER}                AI TERMINAL CHAT                  {COLOR_RESET}")
+    print(f"{COLOR_HEADER}=================================================={COLOR_RESET}")
+    
+    # Establish connection and list models
+    client, model_ids, token = setup_client_and_models()
+    
+    selected_model_id = select_model(model_ids)
+    
+    clear_screen()
+    print(f"{COLOR_HEADER}=================================================={COLOR_RESET}")
+    print(f"{COLOR_HEADER}                AI TERMINAL CHAT                  {COLOR_RESET}")
+    print(f"{COLOR_HEADER}=================================================={COLOR_RESET}")
+    print(f"{COLOR_SYSTEM}Active Model: {selected_model_id}{COLOR_RESET}")
+    print(f"{COLOR_SYSTEM}Commands: '/clear' to reset context, '/exit' to quit.{COLOR_RESET}")
+    print(f"{COLOR_HEADER}--------------------------------------------------{COLOR_RESET}\n")
+
+    messages = []
+    support_tools = True
+
+    while True:
+        try:
+            # User Prompt
+            user_input = input(f"{COLOR_USER}You:{COLOR_RESET} ").strip()
+            
+            if not user_input:
+                continue
+
+            # Command Handling
+            if user_input.lower() in ('/exit', '/quit', 'exit', 'quit'):
+                print(f"\n{COLOR_SYSTEM}Exiting chat session. Goodbye!{COLOR_RESET}")
+                break
+            
+            if user_input.lower() == '/clear':
+                messages = []
+                clear_screen()
+                print(f"{COLOR_SYSTEM}Active Model: {selected_model_id}{COLOR_RESET}")
+                print(f"{COLOR_SYSTEM}Conversation history cleared.{COLOR_RESET}\n")
+                continue
+
+            # Append user message
+            messages.append({"role": "user", "content": user_input})
+
+            # Agent Execution Loop
+            while True:
+                print() # Line space before reply starts
+                
+                # API Call parameters
+                api_kwargs = {
+                    "model": selected_model_id,
+                    "messages": messages,
+                    "stream": True
+                }
+                if support_tools:
+                    api_kwargs["tools"] = TOOLS_SCHEMA
+
+                max_retries = 3
+                retry_delay = 2.0
+                api_success = False
+
+                for attempt in range(max_retries):
+                    spinner = Spinner("Thinking...")
+                    spinner.start()
+                    
+                    try:
+                        response = client.chat.completions.create(**api_kwargs)
+                        
+                        assistant_response = ""
+                        tool_calls_accumulator = {}
+                        spinner_stopped = False
+                        buffer = ""
+
+                        for chunk in response:
+                            if not chunk.choices:
+                                continue
+                            
+                            delta = chunk.choices[0].delta
+                            
+                            # Accumulate function calls
+                            if hasattr(delta, 'tool_calls') and delta.tool_calls:
+                                if not spinner_stopped:
+                                    spinner.stop()
+                                    spinner_stopped = True
+                                    
+                                for tc in delta.tool_calls:
+                                    idx = tc.index
+                                    if idx not in tool_calls_accumulator:
+                                        tool_calls_accumulator[idx] = {
+                                            "id": tc.id if tc.id else None,
+                                            "name": tc.function.name if tc.function and tc.function.name else "",
+                                            "arguments": ""
+                                        }
+                                    else:
+                                        if tc.id:
+                                            tool_calls_accumulator[idx]["id"] = tc.id
+                                        if tc.function and tc.function.name:
+                                            tool_calls_accumulator[idx]["name"] = tc.function.name
+                                    
+                                    if tc.function and tc.function.arguments:
+                                        tool_calls_accumulator[idx]["arguments"] += tc.function.arguments
+
+                            # Buffer initial output to intercept raw text errors from upstream gateway
+                            content = delta.content
+                            if content:
+                                if not spinner_stopped:
+                                    buffer += content
+                                    if len(buffer) >= 20 or "\n" in buffer:
+                                        # Detect common custom gateway error messages sent as normal text completions
+                                        if any(x in buffer.lower() for x in ["[error]", "service temporarily unavailable", "502 bad gateway"]):
+                                            raise Exception(f"Upstream API error text: {buffer.strip()}")
+                                        
+                                        spinner.stop()
+                                        print(f"\r{COLOR_AI}AI:{COLOR_RESET} ", end="", flush=True)
+                                        sys.stdout.write(buffer)
+                                        sys.stdout.flush()
+                                        assistant_response += buffer
+                                        spinner_stopped = True
+                                else:
+                                    sys.stdout.write(content)
+                                    sys.stdout.flush()
+                                    assistant_response += content
+
+                        # Flush remaining buffer if it wasn't flushed during stream
+                        if not spinner_stopped:
+                            if buffer:
+                                if any(x in buffer.lower() for x in ["[error]", "service temporarily unavailable", "502 bad gateway"]):
+                                    raise Exception(f"Upstream API error text: {buffer.strip()}")
+                                spinner.stop()
+                                print(f"\r{COLOR_AI}AI:{COLOR_RESET} ", end="", flush=True)
+                                sys.stdout.write(buffer)
+                                sys.stdout.flush()
+                                assistant_response += buffer
+                            else:
+                                spinner.stop()
+                                print(f"\r{COLOR_AI}AI:{COLOR_RESET} [Empty response]")
+                        
+                        api_success = True
+                        break # Break out of retry loop on successful completion stream
+
+                    except Exception as e:
+                        spinner.stop()
+                        err_str = str(e)
+                        
+                        # Handle tool compatibility failure (fallback to text-only)
+                        if support_tools and any(x in err_str.lower() for x in ["tool", "400", "invalid_request_error"]):
+                            support_tools = False
+                            print(f"\r{COLOR_SYSTEM}[System: Model doesn't support tools, falling back to text-only mode]{COLOR_RESET}")
+                            break # Exits retry loop to restart the loop iteration without tools
+                        
+                        # Detect transience for retry trigger
+                        is_transient = any(x in err_str.lower() for x in ["timeout", "502", "503", "504", "408", "rate limit", "connection error", "upstream api error"])
+                        
+                        if is_transient and attempt < max_retries - 1:
+                            sys.stdout.write(f"\r{COLOR_ERROR}⚠️ API connection error. Retrying in {retry_delay:.1f}s (Attempt {attempt+1}/{max_retries})...{COLOR_RESET}\n")
+                            sys.stdout.flush()
+                            time.sleep(retry_delay)
+                            retry_delay *= 2.0
+                            continue
+                        else:
+                            print(f"\r{COLOR_ERROR}Error calling API: {e}{COLOR_RESET}")
+                            break # Exit retry loop on final failure
+                
+                if not api_success:
+                    # Break out of agent execution loop if retry loop failed completely
+                    break
+
+                # Handle tool requests
+                if tool_calls_accumulator:
+                    sys.stdout.write("\r" + " " * 40 + "\r")
+                    sys.stdout.flush()
+
+                    serialized_tool_calls = []
+                    assistant_msg_tool_calls = []
+                    
+                    for idx in sorted(tool_calls_accumulator.keys()):
+                        tc = tool_calls_accumulator[idx]
+                        tool_call_obj = {
+                            "id": tc["id"] or f"call_{int(time.time())}_{idx}",
+                            "type": "function",
+                            "function": {
+                                "name": tc["name"],
+                                "arguments": tc["arguments"]
+                            }
+                        }
+                        serialized_tool_calls.append(tool_call_obj)
+                        assistant_msg_tool_calls.append(tool_call_obj)
+                        
+                    messages.append({
+                        "role": "assistant",
+                        "content": assistant_response or None,
+                        "tool_calls": assistant_msg_tool_calls
+                    })
+
+                    for tc in serialized_tool_calls:
+                        name = tc["function"]["name"]
+                        args_str = tc["function"]["arguments"]
+                        call_id = tc["id"]
+                        
+                        print(f"{COLOR_TOOL}⚙️ Running tool {name}({args_str})...{COLOR_RESET}")
+                        
+                        result = execute_tool(name, args_str)
+                        print(f"{COLOR_TOOL} └─ Result: {result}{COLOR_RESET}")
+                        
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": call_id,
+                            "name": name,
+                            "content": result
+                        })
+                    
+                    continue # Re-enter agent loop to let the assistant read the tool results
+                else:
+                    print("\n")
+                    messages.append({"role": "assistant", "content": assistant_response})
+                    break
+
+        except KeyboardInterrupt:
+            print(f"\n\n{COLOR_SYSTEM}Session interrupted. Exiting.{COLOR_RESET}")
+            break
+        except Exception as e:
+            print(f"\n{COLOR_ERROR}Error: {e}{COLOR_RESET}\n")
+
+if __name__ == "__main__":
+    main()

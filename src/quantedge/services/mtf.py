@@ -356,14 +356,12 @@ def analyze_multi_timeframe(
                 )
 
     # Abstention is not disagreement. A ranging or uncertain view carries no
-    # directional information, so it is dropped from the average and the
-    # remaining weights are renormalised -- the same rule ``scoring._blend``
-    # applies to an indicator that is undefined on the bars available. Dividing
-    # by the full stack instead scored an abstaining view exactly like an
-    # opposing one, which put a hard ceiling on the achievable agreement: with
-    # these weights a symbol whose confirmation and regime views were both
-    # ranging could reach at most 0.25 and so could never clear a 0.5 gate, no
-    # matter how cleanly its execution view was trending.
+    # directional information, so it does not count against the direction the
+    # other views found -- it simply fails to support it, and the score falls by
+    # that view's weight rather than flipping to zero. The distinction matters
+    # because the two states are genuinely different: two views agreeing while
+    # the third is ranging is a weaker setup than three agreeing, and both are
+    # different from two views pointing opposite ways.
     voted_weight = up_weight + down_weight
     abstaining = [
         view.role
@@ -374,18 +372,34 @@ def analyze_multi_timeframe(
     aligned: SignalDirection | None = None
     score = 0.0
     if voted_weight > 0 and not conflicts:
+        # Divided by the *usable* weight, not by the weight that voted. Dividing
+        # by voted_weight made this number true by construction: the branch only
+        # runs when there are no conflicts, so one of the two sides is always
+        # zero and the other is always the whole numerator -- the ratio came out
+        # at exactly 1.0 every time it was not 0.0. A binary flag was being
+        # presented as a graded agreement measure, which had three consequences:
+        # the 0.50 gate rejected nothing that unanimity had not already rejected
+        # (any threshold in (0, 1] behaved identically), a lone execution view
+        # with both other roles abstaining scored a perfect 1.0, and the
+        # composite fed on a constant that added 0.10 to every surviving
+        # candidate while looking like evidence.
+        #
+        # Against available_weight the number means what its name claims: the
+        # share of the usable stack that actually agreed. All three views agree
+        # -> 1.0; confirmation and regime agree while execution abstains -> 0.75;
+        # execution alone -> 0.25, which the gate now correctly declines.
         if up_weight > 0 and down_weight == 0:
             aligned = SignalDirection.UP
-            score = up_weight / voted_weight
+            score = up_weight / available_weight
         elif down_weight > 0 and up_weight == 0:
             aligned = SignalDirection.DOWN
-            score = down_weight / voted_weight
+            score = down_weight / available_weight
 
-    # Renormalising makes the score say "the views that spoke were unanimous"
-    # rather than "the whole stack agrees", so participation has to travel with
-    # it or the two get confused. It is measured against the weight that was
-    # usable, not the full stack, so a view lost to a data-quality failure does
-    # not read as an abstention it never made.
+    # Participation is now the same denominator the score uses, so the two agree
+    # by construction rather than needing to be read together. It is kept because
+    # it separates the two ways a score can be low: 0.25 from a lone execution
+    # view, versus 0.25 because two of three views failed data quality. The gate
+    # treats those differently and the message needs to name which happened.
     participation = voted_weight / available_weight if available_weight > 0 else 0.0
 
     if not voted and views:

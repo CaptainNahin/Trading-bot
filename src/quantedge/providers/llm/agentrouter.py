@@ -48,13 +48,30 @@ log = get_logger(__name__)
 # we strip the trailing "/v1" so the SDK doesn't double it.
 _DEFAULT_BASE_URL = "https://agentrouter.org"
 _DEFAULT_MODEL = "claude-opus-5"
-_TIMEOUT_SECONDS = 45.0
+
+# Generous, because a reasoning model spends most of its budget before the first
+# visible character and the whole call is one round trip we either complete or
+# discard. A short timeout here does not fail fast, it fails silently: the review
+# is dropped and the deterministic candidate ships unreviewed.
+_TIMEOUT_SECONDS = 180.0
 
 # Low but non-zero: the review is a judgement over fixed evidence, so there is
 # no benefit in sampling widely, and a deterministic-leaning setting keeps two
 # runs over the same context close enough to compare.
 _TEMPERATURE = 0.2
-_MAX_TOKENS = 1200
+
+# The reply itself is ~700 tokens of JSON. The rest of this budget is headroom
+# for reasoning: models in this family emit a `thinking` block before any text,
+# and that block is charged against the same ceiling. At 1200 the entire budget
+# went to reasoning, the response came back `stop_reason="max_tokens"` carrying a
+# thinking block and no text at all, and every review failed as "empty message"
+# while the health probe -- one token, no system prompt, no reasoning -- passed.
+# The gateway was never the problem; the ceiling was.
+_MAX_TOKENS = 8000
+
+# Enough for a reasoning preamble plus one word. A single-token probe is what
+# made the board lie: it could not reach the failure mode it was there to catch.
+_HEALTH_MAX_TOKENS = 512
 
 
 def _normalise_base_url(url: str) -> str:
@@ -105,6 +122,13 @@ class AgentRouterLLMProvider(BaseLLMProvider):
         A configured key that the gateway rejects is a *worse* state than no key
         at all, because it looks configured.  ``DISABLED`` means nothing to try;
         ``ERROR`` means we tried and it did not work, with the reason attached.
+
+        The probe asks for a real, if tiny, completion and insists on getting
+        text back. It used to request ``max_tokens=1``, which proved only that
+        the socket opened -- so the board read ``ok`` during a period when every
+        actual review was failing, because the failure lived in the response
+        budget rather than in the connection. A probe that cannot fail the way
+        production fails is not measuring production.
         """
         if not self._api_key:
             return ProviderHealth(
@@ -118,17 +142,36 @@ class AgentRouterLLMProvider(BaseLLMProvider):
             )
 
         try:
-            client = self._get_client(timeout=15.0)
+            client = self._get_client(timeout=30.0)
             response = client.messages.create(
                 model=self.model_name,
-                max_tokens=1,
-                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=_HEALTH_MAX_TOKENS,
+                messages=[{"role": "user", "content": "Reply with the single word: pong"}],
             )
             # Touch the payload so a malformed body fails here rather than at the
             # first real call. A str or dict body is what some gateways return in
             # place of a message object; either is enough to prove reachability.
-            if not isinstance(response, str | dict):
-                _ = getattr(response, "content", None)
+            if isinstance(response, str | dict):
+                returned_text = bool(str(response).strip())
+            else:
+                returned_text = any(
+                    getattr(block, "type", None) == "text"
+                    and getattr(block, "text", "").strip()
+                    for block in (getattr(response, "content", None) or [])
+                )
+            if not returned_text:
+                return ProviderHealth(
+                    provider=self.provider_name,
+                    kind="llm",
+                    status=HealthStatus.ERROR,
+                    enabled=True,
+                    credentials_present=True,
+                    message=(
+                        f"{self._base_url} answered but produced no text "
+                        f"(stop_reason={getattr(response, 'stop_reason', 'unknown')}); "
+                        "reviews would fail"
+                    ),
+                )
         except Exception as exc:  # noqa: BLE001 - a health probe reports any failure
             err_msg = str(exc)
             # Truncate long error messages for the health report
@@ -149,7 +192,7 @@ class AgentRouterLLMProvider(BaseLLMProvider):
             status=HealthStatus.OK,
             enabled=True,
             credentials_present=True,
-            message=f"{self._base_url} reachable, model {self.model_name}",
+            message=f"{self._base_url} reachable, model {self.model_name} answering",
         )
 
     def evaluate_signal_context(self, context: SignalContext) -> LLMSignalResponse:
@@ -230,14 +273,28 @@ class AgentRouterLLMProvider(BaseLLMProvider):
             text = response.get("content", "")
         else:
             content = getattr(response, "content", [])
+            # Filter on the block's declared type rather than on the presence of
+            # a `.text` attribute: a reasoning block carries its own payload and
+            # must not be concatenated into the JSON we are about to parse.
             text_parts = [
                 block.text
                 for block in content
-                if hasattr(block, "text")
+                if getattr(block, "type", None) == "text" and hasattr(block, "text")
             ]
             text = "".join(text_parts)
 
         if not text.strip():
+            stop_reason = getattr(response, "stop_reason", None)
+            if stop_reason == "max_tokens":
+                # Distinguishable on purpose. "Empty message" reads as a gateway
+                # fault and sends the next reader to check the endpoint; the
+                # actual cause is our own ceiling being spent on reasoning before
+                # the model reached the answer, which is a config fix here.
+                raise ProviderBadResponseError(
+                    self.provider_name,
+                    f"response hit the {_MAX_TOKENS}-token ceiling before emitting "
+                    "any text; raise AGENTROUTER max_tokens for this model",
+                )
             raise ProviderBadResponseError(
                 self.provider_name, "model returned an empty message"
             )
