@@ -48,7 +48,13 @@ _BASE_URL = "https://api.anthropic.com/v1"
 _API_VERSION = "2023-06-01"
 _TIMEOUT_SECONDS = 45.0
 _TEMPERATURE = 0.2
-_MAX_TOKENS = 1200
+# Headroom above the ~700-token JSON reply. A reasoning model spends most of its
+# budget before the first visible character and that spend is charged against
+# this same ceiling, so a tight limit does not produce a short answer -- it
+# produces no answer at all, returned as stop_reason="max_tokens" with an empty
+# text block. That is exactly what 1200 did on the AgentRouter path, where it
+# failed every review while a one-token health probe kept reporting "ok".
+_MAX_TOKENS = 8000
 
 
 class AnthropicLLMProvider(BaseLLMProvider):
@@ -192,7 +198,17 @@ class AnthropicLLMProvider(BaseLLMProvider):
             if isinstance(b, dict) and b.get("type") == "text"
         )
         if not text.strip():
-            raise ProviderBadResponseError(self.provider_name, "model returned no text content")
+            # Name stop_reason and the block types present. Without them this
+            # error is indistinguishable from a dozen unrelated causes, and the
+            # one that actually occurred -- the whole budget spent on reasoning
+            # before any text, reported as "max_tokens" -- is the one a raised
+            # ceiling fixes in seconds once it is named.
+            kinds = sorted({b.get("type", "?") for b in blocks if isinstance(b, dict)})
+            raise ProviderBadResponseError(
+                self.provider_name,
+                f"model returned no text content (stop_reason="
+                f"{data.get('stop_reason')!r}, blocks={kinds or 'none'})",
+            )
 
         usage = data.get("usage") or {}
         log.info(

@@ -194,10 +194,23 @@ def generate_trade_recommendation(
     )
 
     if decision.status is not SignalStatus.SIGNAL or decision.direction is None:
+        # Which list holds the reason depends on why the decision came back.
+        # INSUFFICIENT_DATA means something was missing, so missing_information
+        # names the cause. NO_TRADE means the evidence was read and found
+        # wanting, and the cause is the contradiction that decided it -- taking
+        # missing_information[0] in that case led with an unrelated data gap
+        # ("Liquidity session state not available") while the reasons that
+        # actually declined the trade were pushed into the detail line.
+        if decision.status is SignalStatus.INSUFFICIENT_DATA:
+            reasons = list(decision.missing_information)
+        else:
+            reasons = list(decision.contradictory_evidence) or list(
+                decision.missing_information
+            )
         raise NoTradeReason(
             decision.status,
-            (decision.missing_information or ["no setup met the configured criteria"])[0],
-            detail="; ".join(decision.contradictory_evidence[:3]),
+            (reasons or ["no setup met the configured criteria"])[0],
+            detail="; ".join(reasons[1:4]),
         )
     if decision.reference_price is None:
         raise NoTradeReason(
