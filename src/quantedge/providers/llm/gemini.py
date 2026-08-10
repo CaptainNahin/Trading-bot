@@ -264,8 +264,8 @@ class GeminiLLMProvider(BaseLLMProvider):
         if code == httpx.codes.BAD_REQUEST:
             raise ProviderBadResponseError(
                 self.provider_name,
-                f"the Gemini API returned HTTP 400 (bad request); "
-                f"check model name and request body",
+                "the Gemini API returned HTTP 400 (bad request); "
+                "check model name and request body",
                 sample=response.text[:200],
             )
 

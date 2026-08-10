@@ -51,7 +51,16 @@ _DEFAULT_TARGET_R = Decimal("2.0")
 class RiskLevels:
     """Stop, target and the arithmetic that connects them."""
 
-    __slots__ = ("basis", "notes", "reward_distance", "risk_distance", "rr", "stop", "target")
+    __slots__ = (
+        "basis",
+        "notes",
+        "reward_distance",
+        "risk_distance",
+        "rr",
+        "stop",
+        "target",
+        "target_from_structure",
+    )
 
     def __init__(
         self,
@@ -62,6 +71,7 @@ class RiskLevels:
         reward_distance: Decimal,
         basis: str,
         notes: list[str],
+        target_from_structure: bool = True,
     ) -> None:
         self.stop = stop
         self.target = target
@@ -70,10 +80,19 @@ class RiskLevels:
         self.reward_distance = reward_distance
         self.basis = basis
         self.notes = notes
+        self.target_from_structure = target_from_structure
 
     @property
     def acceptable(self) -> bool:
-        """Whether the derived ratio clears the minimum worth presenting."""
+        """Whether the derived ratio clears the minimum worth presenting.
+
+        A ratio computed against an R-multiple target is ``_DEFAULT_TARGET_R`` by
+        construction and would clear any threshold below it, so it is not
+        evidence and does not count as clearing this gate. Only a target taken
+        from a real structural level can.
+        """
+        if not self.target_from_structure:
+            return False
         return Decimal(str(self.rr)) >= MIN_ACCEPTABLE_RR
 
 
@@ -128,10 +147,23 @@ def derive_risk_levels(
     if objective is not None and abs(objective - reference_price) >= min_reward:
         reward_distance = abs(objective - reference_price)
         target_basis = "opposing structural level"
+        target_from_structure = True
     else:
+        # No structural level far enough away to aim at. The target is then a
+        # multiple of the stop, which means the resulting ratio is arithmetic on
+        # our own constant rather than a measurement of the setup -- it comes out
+        # at exactly _DEFAULT_TARGET_R every time. That is fine as a level to
+        # trade toward and useless as evidence the trade is worth taking, so it
+        # is flagged and excluded from the acceptability gate below. Presenting
+        # it as "reward:risk 2.00" alongside genuine ratios was the defect: it
+        # made every such setup look like it had cleared a bar it never faced.
         reward_distance = stop_distance * _DEFAULT_TARGET_R
-        target_basis = f"{_DEFAULT_TARGET_R}R (optimized risk:reward target)"
-        notes.append("target sized in R to maintain positive trade expectancy")
+        target_basis = f"{_DEFAULT_TARGET_R}R from the stop; no structural target in range"
+        target_from_structure = False
+        notes.append(
+            "no opposing structural level within reach: the target is derived from "
+            "the stop, so the ratio below is definitional, not measured"
+        )
 
     if direction is SignalDirection.UP:
         stop = reference_price - stop_distance
@@ -154,6 +186,7 @@ def derive_risk_levels(
         reward_distance=reward_distance.quantize(quantum),
         basis=basis,
         notes=notes,
+        target_from_structure=target_from_structure,
     )
 
 

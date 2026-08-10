@@ -208,6 +208,16 @@ def generate_trade_recommendation(
     # ratio says to skip. The levels are real -- ATR-derived and structural --
     # which is why the fix is to refuse the trade rather than move the target.
     if not levels.acceptable:
+        if not levels.target_from_structure:
+            raise NoTradeReason(
+                SignalStatus.NO_TRADE,
+                "no price level within reach to target",
+                detail=(
+                    f"the stop sits at {levels.stop} on volatility, but there is no "
+                    "structural level ahead to aim at, so any target would be a "
+                    "multiple of the stop rather than a place the market has defended"
+                ),
+            )
         raise NoTradeReason(
             SignalStatus.NO_TRADE,
             f"reward:risk {levels.rr:.2f} is below the {MIN_ACCEPTABLE_RR} minimum",
