@@ -53,7 +53,13 @@ _DEFAULT_MODEL = "claude-opus-5"
 # visible character and the whole call is one round trip we either complete or
 # discard. A short timeout here does not fail fast, it fails silently: the review
 # is dropped and the deterministic candidate ships unreviewed.
-_TIMEOUT_SECONDS = 180.0
+#
+# This is the default for a long-lived process. Under a host that enforces its
+# own wall clock -- serverless -- the host wins, and losing to the host is worse:
+# it kills the request mid-flight and returns nothing, where expiring here still
+# returns the deterministic answer. Such deployments set ``LLM_TIMEOUT_SECONDS``
+# below the host ceiling, less the time the scan already spent.
+_DEFAULT_TIMEOUT_SECONDS = 180.0
 
 # Low but non-zero: the review is a judgement over fixed evidence, so there is
 # no benefit in sampling widely, and a deterministic-leaning setting keeps two
@@ -97,6 +103,7 @@ class AgentRouterLLMProvider(BaseLLMProvider):
         self._api_key = api_key or settings.secret(settings.agentrouter_api_key)
         raw_url = base_url or settings.agentrouter_base_url or _DEFAULT_BASE_URL
         self._base_url = _normalise_base_url(raw_url)
+        self._timeout = settings.llm_timeout_seconds or _DEFAULT_TIMEOUT_SECONDS
 
     @property
     def base_url(self) -> str:
@@ -106,14 +113,14 @@ class AgentRouterLLMProvider(BaseLLMProvider):
     def credentials_present(self) -> bool:
         return bool(self._api_key)
 
-    def _get_client(self, timeout: float = _TIMEOUT_SECONDS) -> Any:
+    def _get_client(self, timeout: float | None = None) -> Any:
         """Create an Anthropic client pointed at AgentRouter."""
         import anthropic
 
         return anthropic.Anthropic(
             api_key=self._api_key,
             base_url=self._base_url,
-            timeout=timeout,
+            timeout=timeout if timeout is not None else self._timeout,
         )
 
     def health(self) -> ProviderHealth:
@@ -252,9 +259,7 @@ class AgentRouterLLMProvider(BaseLLMProvider):
                 retry_after_seconds=None,
             ) from exc
         except anthropic.APITimeoutError as exc:
-            raise ProviderTimeoutError(
-                self.provider_name, _TIMEOUT_SECONDS
-            ) from exc
+            raise ProviderTimeoutError(self.provider_name, self._timeout) from exc
         except anthropic.APIStatusError as exc:
             raise ProviderUnavailableError(
                 self.provider_name,

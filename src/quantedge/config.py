@@ -110,6 +110,14 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-sonnet-4-5"
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.1-pro-preview"
+    # How long to wait for a review before abandoning it and shipping the
+    # deterministic candidate unreviewed. The default suits a long-lived
+    # process. A serverless host kills the whole request at its own ceiling,
+    # which is lower -- and a killed request returns nothing at all, where an
+    # abandoned review still returns the deterministic answer. So any deployment
+    # with a wall clock shorter than this must set it below that wall clock,
+    # leaving room for the scan that runs first.
+    llm_timeout_seconds: float = 180.0
 
     # ---- Binance (public market data only) ----
     binance_rest_base_url: str = "https://data-api.binance.vision"

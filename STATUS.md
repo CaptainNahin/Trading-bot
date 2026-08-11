@@ -61,6 +61,13 @@ Each was a value that was true by construction being presented as a measurement.
    NO_TRADE was announced as "Liquidity session state not available" while the
    real cause was demoted. NO_TRADE now leads with the contradiction that
    decided it; INSUFFICIENT_DATA still leads with the gap.
+6. **Review timeout exceeded the serverless wall clock.** The reviewer waited
+   180s; Vercel kills the request at 60s. `signal.py` already degrades a failed
+   review to the deterministic candidate, but that path could never run in
+   production — the host killed the process first, returning an empty 504
+   instead of an answer. The timeout is now `LLM_TIMEOUT_SECONDS`, set to 30 in
+   production against a measured 15.9s scan, so the review expires inside our
+   own process and the degrade path is reachable.
 
 ## Known limitations
 
@@ -76,6 +83,12 @@ Each was a value that was true by construction being presented as a measurement.
 - **Observed win rate stays `sample_too_small`** until 30+ trades settle.
 - Selectivity changes reduce how many setups are shown. They do not make a shown
   setup more likely to be right.
+- **Request latency is close to the serverless ceiling.** A chat request measured
+  15.9s in production and 71–77s from a local machine; the difference is network
+  distance to Binance and Supabase, not compute. The Vercel Hobby ceiling is 60s
+  and `maxDuration` is set to it. A production request that escalates to the
+  reviewer has ~30s of headroom by design, and abandons the review rather than
+  the request if it runs out.
 
 ## Security
 
