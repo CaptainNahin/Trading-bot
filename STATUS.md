@@ -1,6 +1,6 @@
 # QuantEdge Live Market Gateway — Status
 
-Last updated: 2026-08-10 (audit pass)
+Last updated: 2026-08-11 (production deployment verified)
 
 ## Working
 
@@ -21,17 +21,45 @@ Last updated: 2026-08-10 (audit pass)
 | REST + MCP | FastAPI surface and MCP tool server, both verified. |
 | Verification | `scripts/verify_all.py` — 11/11 suites passing. ruff + mypy clean, 71 files. |
 
-## Provider health (live at last check)
+## Production (verified 2026-08-11)
 
-    binance       ok    api.binance.com
-    twelvedata    ok
-    alphavantage  ok
-    agentrouter   ok    claude-opus-5
-    gemini        error HTTP 429 (quota exhausted)
-    anthropic     error HTTP 401
-    oanda/fmp/finnhub  disabled — no credentials
+Deployed commit `3e6621f` at `https://trading-bot-six-kohl.vercel.app`, via the
+Vercel GitHub App on push to `main`.
 
-`LLM_PROVIDER=agentrouter`.
+| Check | Result |
+|---|---|
+| HTTP Basic auth | Enforced — unauthenticated root returns 401 |
+| `GET /api/v1/health` | 200 in 11.1s |
+| `POST /api/v1/bot/chat` | 200 in 15.0s, answered |
+| Reviewer, probed from inside the runtime | `agentrouter ok — claude-opus-5 answering` |
+| Supabase schema | At head `7a66cbb55ec9`; all 17 tables present |
+| Persistence | 55 memories survive cold starts, so Postgres is in use, not `/tmp` SQLite |
+| `POST /bot/trade-recommendation` | 409 NO_TRADE in 5.3–5.6s (agreement gate) |
+
+The reviewer question is settled by the chat `status` intent, which calls
+`default_llm_provider().health()` in the deployed process: the probe demands real
+text back, so `ok` means the model answered there and then. The two 409s above
+were decided by the deterministic agreement gate *before* escalation, so they say
+nothing about the reviewer either way — hence the separate probe.
+
+The runtime reports Binance at `data-api.binance.vision` while `vercel.json` sets
+`api.binance.com`. That is the 451 host failover in `rest.py::_get_json` doing its
+job, not an unapplied variable: `data-api.binance.vision` is the first fallback
+host, and the same env block is demonstrably live, since the reviewer credential
+and both fallback market-data keys reach the runtime from it.
+
+## Provider health (live in production, 2026-08-11)
+
+    binance       ok        data-api.binance.vision (451 failover from api.binance.com)
+    twelvedata    ok        free-tier quota applies
+    alphavantage  ok        news feed, 50 items in probe
+    agentrouter   ok        claude-opus-5 answering
+    oanda         disabled  OANDA_API_TOKEN, OANDA_ACCOUNT_ID absent
+    fmp           disabled  FMP_API_KEY absent — no economic calendar
+    finnhub       disabled  FINNHUB_API_KEY absent — no economic calendar
+
+`LLM_PROVIDER=agentrouter`. Gemini and Anthropic are no longer configured; their
+keys were removed from the deployment in `3e6621f`.
 
 ## Defects found and fixed in the audit pass
 
@@ -80,9 +108,17 @@ Each was a value that was true by construction being presented as a measurement.
 - **No `SessionState` producer exists.** Nothing measures order-book depth or
   session liquidity, so the field is not populated rather than asserted.
 - **No calibration model.** No confidence number is presented as a probability.
-- **Observed win rate stays `sample_too_small`** until 30+ trades settle.
+- **Observed win rate is 47.3% over 55 settled trades** (26 wins / 29 losses) as
+  of 2026-08-11. It is above the 30-trade threshold, so it is reported as a real
+  observation rather than `sample_too_small`. It is a record of what happened, not
+  a forecast, and it is not the probability of the next trade winning.
 - Selectivity changes reduce how many setups are shown. They do not make a shown
   setup more likely to be right.
+- **The reviewer escalation path is unexercised in production.** Every
+  recommendation sampled on 2026-08-11 declined at the deterministic
+  multi-timeframe gate before reaching the LLM. The reviewer is reachable and
+  answering — probed directly — but no production request has yet run the full
+  escalate-and-review path end to end.
 - **Request latency is close to the serverless ceiling.** A chat request measured
   15.9s in production and 71–77s from a local machine; the difference is network
   distance to Binance and Supabase, not compute. The Vercel Hobby ceiling is 60s
@@ -92,7 +128,28 @@ Each was a value that was true by construction being presented as a measurement.
 
 ## Security
 
-- `.env` is git-ignored; no secret has been printed or committed.
 - Binance access is public market-data endpoints only. No account, wallet,
   margin, futures or order-placement surface.
-- **The Binance key was transmitted in plaintext chat and should be rotated.**
+- `.env` is git-ignored and no secret was printed to a log or a terminal by this
+  codebase.
+
+### Open incident: eight credentials are public
+
+`vercel.json` is git-tracked and `CaptainNahin/Trading-bot` is a **public**
+repository, so every value in its `env` block is world-readable. An
+unauthenticated fetch of the `raw.githubusercontent.com` URL returns HTTP 200.
+
+Exposed, and each needing rotation: `BINANCE_API_KEY`, `BINANCE_API_SECRET`,
+`DATABASE_URL` (Supabase password inline), `AGENTROUTER_API_KEY`,
+`ANTHROPIC_API_KEY`, `TWELVE_DATA_API_KEY`, `ALPHA_VANTAGE_API_KEY`,
+`API_AUTH_TOKEN`. A GitHub PAT also sits in plaintext in `.git/config`.
+
+`3e6621f` removed `BINANCE_API_SECRET`, `ANTHROPIC_API_KEY` and the Gemini keys
+from `HEAD`, but **git history still holds every one of them** — removing a secret
+from the current file does not unpublish it. Rotation at the provider is the only
+remedy; the five values still in `HEAD` remain live.
+
+The fix is to move these into Vercel's encrypted environment store and delete the
+`env` block from `vercel.json`. That was not done here because the supplied Vercel
+token has no access to this project (`/v9/projects` returns `[]`, `/v2/teams`
+returns 403), so the store is unreachable from this session.

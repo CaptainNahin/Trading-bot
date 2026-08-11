@@ -2,6 +2,15 @@
 
 Ordered by what buys the most, not by effort.
 
+## 0. Rotate the eight exposed credentials
+
+They are public in git history right now (see STATUS.md → Security). Rotation is
+the only remedy — deleting the keys from the current file does not unpublish what
+history still holds. New keys must go into Vercel's encrypted environment store,
+never back into `vercel.json`, whose `env` block should then be deleted. The
+store is reachable from the Vercel dashboard; the token supplied to this session
+has no access to the project.
+
 ## 1. Write the pytest suite
 
 `tests/` is empty. `scripts/verify_*.py` covers the same ground and runs green,
@@ -14,16 +23,23 @@ particular were invisible for the same reason: nothing asserted that a score
 could take more than one value. A test that enumerates the input space and
 asserts the output varies would have caught both.
 
-## 2. Settle enough trades to say anything about accuracy
+## 2. Calibration
 
-The observed win rate is honest and useless at n=1. Thirty decided trades is the
-point where it stops being noise. Nothing to build here, only to run.
+The observed win rate passed the 30-trade threshold on 2026-08-11: 47.3% over 55
+settled trades. That is now a real measurement, and it is the input calibration
+needs. Fit a calibration model on unseen data so `calibrated_probability` can stop
+being `None`. Until that exists, no number in the system may be called a
+probability — including the 47.3%, which describes trades already closed and says
+nothing about the next one.
 
-## 3. Calibration
+## 3. Exercise the reviewer end to end in production
 
-Once there is a settled history, fit a calibration model on unseen data so
-`calibrated_probability` can stop being `None`. Until then no number in the
-system may be called a probability.
+Every production recommendation sampled so far declined at the deterministic
+multi-timeframe gate, so the escalate-to-reviewer path has never run under the
+serverless wall clock. The reviewer answers when probed directly, and the 30s
+`LLM_TIMEOUT_SECONDS` is set below the 60s host ceiling by design, but the
+combined latency of scan-then-review has not been measured in production. Worth
+capturing the first request that does escalate.
 
 ## Optional, in rough order of value
 

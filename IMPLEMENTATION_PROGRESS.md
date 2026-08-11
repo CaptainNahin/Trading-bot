@@ -46,3 +46,26 @@ Live checks performed this pass:
   on every clean symbol, which is a property of the tape, not of the code.
 - The 0.5 alignment gate now rejects 3 of 6 scanned symbols. Before the fix it
   rejected nothing at any threshold in (0, 1].
+
+## Production deployment (2026-08-11) — 3e6621f
+
+Commit `3e6621f` "feat: migrate from Gemini to Agentrouter API" pushed to `main`
+and deployed to Production via the Vercel GitHub App. Verified live:
+
+- The reviewer is **active in production**: the chat `status` intent probes
+  `default_llm_provider().health()` inside the deployed process and demands real
+  text back; it reports `agentrouter ok — claude-opus-5 answering`. `vercel.json`'s
+  `env` block demonstrably reaches the runtime (the same block supplies the
+  reviewer key and the Twelve Data / Alpha Vantage keys).
+- **Supabase is the live store**: alembic is at head `7a66cbb55ec9` on
+  `aws-0-ap-southeast-1.pooler.supabase.com:6543`; all 17 tables exist;
+  55 memories persist across cold starts (a `/tmp` SQLite fallback would reset).
+- Binance reports `data-api.binance.vision` — the 451 host failover in
+  `rest.py::_get_json` swapping off the geo-blocked `api.binance.com`, exactly as
+  designed.
+- Both sampled recommendations declined at the deterministic multi-timeframe gate
+  (409 NO_TRADE, ~5.5s) — correct selectivity, and the reviewer escalation path
+  remains unexercised in production.
+
+Security incident restated: 8 credentials remain public in git history (see
+STATUS.md → Security); rotation is the only remedy and is task #0 in NEXT_STEPS.
