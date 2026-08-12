@@ -19,7 +19,6 @@
     "TWELVE_DATA_API_KEY": "b94342ca208d435a93faedeed7fc36e8",
     "ALPHA_VANTAGE_API_KEY": "Yt801sIKE8QoIUUTuFNjkjFSNXhouwVp",
     "LLM_PROVIDER": "agentrouter",
-    "AGENTROUTER_API_KEY": "sk-2rBiRjCipjN6lWcps2KcXNAkoNdzcqY0e8VN7oAExq5WRcYC",
     "AGENTROUTER_MODEL": "claude-opus-5",
     "LLM_TIMEOUT_SECONDS": "30",
     "BINANCE_REST_BASE_URL": "https://api.binance.com",
