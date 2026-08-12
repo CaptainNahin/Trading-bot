@@ -679,6 +679,13 @@ class TradeRecommendation(_Model):
     # a rule seen once is not presented as a pattern.
     memory_rules_applied: list[str] = Field(default_factory=list)
     heuristic_score: float = 0.75
+    # The composite heuristic score expressed as a whole-number percentage, so a
+    # user has the "how sure is it" figure without reading a 0..1 float. It is the
+    # SAME deterministic evidence-agreement score, not a new quantity: it measures
+    # how strongly the computed evidence backs the setup. It is explicitly NOT a
+    # calibrated probability that the trade wins (Rule 3) -- no calibration model
+    # is fitted, so no such number exists -- and a reader must not treat it as one.
+    confidence_pct: int = Field(default=0, ge=0, le=100)
     rationale: str = ""
     # Caveats that qualify the recommendation without withdrawing it: degraded
     # data quality, unfavourable reward:risk. A setup can clear the bar to be

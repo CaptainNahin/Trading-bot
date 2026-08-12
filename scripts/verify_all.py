@@ -18,6 +18,7 @@ VERIFICATION_SCRIPTS = [
     "verify_mcp.py",
     "verify_api.py",
     "verify_memory_bot.py",
+    "verify_review_reconcile.py",
 ]
 
 
@@ -49,7 +50,7 @@ def main() -> int:
             print(f"  - {s}")
         return 1
 
-    print("SUCCESS: ALL VERIFICATION SUITES PASSED CLEANLY (11/11)")
+    print("SUCCESS: ALL VERIFICATION SUITES PASSED CLEANLY (12/12)")
     print("=" * 80)
     return 0
 

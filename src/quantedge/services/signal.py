@@ -136,6 +136,17 @@ def generate_signal_decision(
                 extra={"symbol": symbol, "code": exc.code},
             )
 
+    # Conservative-only review. The scanner owns the direction; the reviewer owns
+    # the veto. A SIGNAL verdict that reverses the deterministic direction is
+    # treated as a decline, never as a flipped trade -- otherwise the reviewer
+    # could turn a correct deterministic setup into its opposite, which is the one
+    # thing the documented contract says it must not do ("the LLM can only ever
+    # make the system more conservative"). Enforced in code rather than trusted to
+    # the prompt, because a directional flip is too costly to leave to model
+    # compliance.
+    if validated is not None:
+        validated = _reconcile_review(validated, candidate.direction, symbol=symbol)
+
     decision = AIDecision(
         decision_id=str(uuid.uuid4()),
         symbol=symbol,
@@ -269,6 +280,12 @@ def generate_trade_recommendation(
     now = utc_now()
     expiry = expiry_for(horizon_minutes(horizon), now)
 
+    # The composite score as a percentage. Derived, not measured: it is exactly
+    # decision.heuristic_score * 100, the same evidence-agreement score already
+    # shown, surfaced as the "how sure" figure the user asked for. It is not a
+    # calibrated win probability and is never presented as one (Rule 3).
+    confidence_pct = round((decision.heuristic_score or 0.0) * 100)
+
     rationale = (
         f"{decision.regime} on the {horizon} horizon, heuristic score "
         f"{decision.heuristic_score:.2f}. Stop {levels.basis}; "
@@ -309,6 +326,7 @@ def generate_trade_recommendation(
         key_lessons_applied=lessons,
         memory_rules_applied=memory_rules,
         heuristic_score=decision.heuristic_score or 0.0,
+        confidence_pct=confidence_pct,
         rationale=rationale,
         warnings=warnings,
         generated_at_utc=now,
@@ -409,6 +427,52 @@ def generate_best_trade_recommendation(
 # ---------------------------------------------------------------------- #
 # helpers                                                               #
 # ---------------------------------------------------------------------- #
+
+
+def _reconcile_review(
+    validated: LLMSignalResponse,
+    candidate_direction: SignalDirection,
+    *,
+    symbol: str,
+) -> LLMSignalResponse:
+    """Enforce the reviewer as conservative-only: it may confirm or decline, never flip.
+
+    - A ``SIGNAL`` verdict that keeps the candidate direction passes through.
+    - A ``SIGNAL`` verdict that omits a direction is read as concurrence with the
+      candidate, so an unstated direction is not mistaken for a decline.
+    - A ``SIGNAL`` verdict whose direction *reverses* the candidate is downgraded
+      to ``NO_TRADE``. The scanner sets direction deterministically; the reviewer's
+      role is a veto, not a reversal. Trading the opposite of a correct setup on a
+      model's say-so is exactly the failure the documented contract rules out.
+    - Any non-``SIGNAL`` verdict (``NO_TRADE`` / ``INSUFFICIENT_DATA``) is returned
+      unchanged: the reviewer is always free to be *more* conservative.
+    """
+    if validated.status is not SignalStatus.SIGNAL:
+        return validated
+    if validated.direction is None:
+        return validated.model_copy(update={"direction": candidate_direction})
+    if validated.direction is candidate_direction:
+        return validated
+    log.info(
+        "reviewer reversed the candidate direction; treating as a decline",
+        extra={
+            "symbol": symbol,
+            "candidate": candidate_direction.value,
+            "reviewer": validated.direction.value,
+        },
+    )
+    return validated.model_copy(
+        update={
+            "status": SignalStatus.NO_TRADE,
+            "direction": None,
+            "contradictory_evidence": [
+                f"Reviewer read the evidence as {validated.direction.value} while the "
+                f"deterministic scan set up {candidate_direction.value}; a reversal is "
+                "declined, not traded in the opposite direction.",
+                *validated.contradictory_evidence,
+            ],
+        }
+    )
 
 
 def _no_trade_decision(symbol: str, horizon: str, scan: ScanResult) -> AIDecision:

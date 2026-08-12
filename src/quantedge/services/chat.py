@@ -474,6 +474,7 @@ def _format_recommendation(rec: Any, minutes: int, expiry: datetime) -> str:
     arrow = "UP" if rec.direction.value == "UP" else "DOWN"
     lines = [
         f"{rec.symbol} -- {arrow} for the next {minutes} minutes.",
+        f"  Confidence     {rec.confidence_pct}% ({rec.risk_level.replace('_', ' ').lower()})",
         "",
         f"  Enter around   {rec.reference_price}",
         f"  Expires        {expiry.strftime('%H:%M:%S')} UTC ({minutes} min from now)",
@@ -481,8 +482,6 @@ def _format_recommendation(rec: Any, minutes: int, expiry: datetime) -> str:
         f"  Target         {rec.take_profit}",
         f"  Reward:risk    {rec.risk_reward_ratio:.2f}",
         f"  Regime         {rec.regime or 'unclassified'}",
-        f"  Setup quality  {rec.risk_level.replace('_', ' ').lower()}"
-        f" (heuristic {rec.heuristic_score:.2f})",
         f"  Venue          {rec.recommended_venue}",
     ]
     if rec.memory_consulted_count:
@@ -502,6 +501,9 @@ def _format_recommendation(rec: Any, minutes: int, expiry: datetime) -> str:
         [
             "",
             rec.rationale,
+            "",
+            f"Confidence ({rec.confidence_pct}%) is how strongly the deterministic "
+            "evidence backs this setup -- not a calibrated probability that it wins.",
             "",
             "Tell me how it went when it closes and I'll record it -- if it loses "
             "I'll work out why first.",
