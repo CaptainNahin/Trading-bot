@@ -3,186 +3,229 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>QuantEdge AI — Memory-Augmented Pro Trading Bot</title>
+    <meta name="theme-color" content="#050506">
+    <meta name="description" content="QuantEdge is a deterministic market-intelligence interface for structured analysis, contextual signals, and outcome memory.">
+    <title>QuantEdge | AI Market Intelligence</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css">
 </head>
 <body>
-    <div class="app-container">
-        <!-- Top Navigation Bar -->
-        <header class="top-header">
-            <div class="brand">
-                <div class="logo-icon">⚡</div>
-                <div class="brand-text">
-                    <h1>QUANTEDGE <span>AI</span></h1>
-                    <p class="subtitle">Self-Correcting Memory-Augmented Trading Bot</p>
-                </div>
-            </div>
-            
-            <div class="header-stats">
-                <div class="stat-pill">
-                    <span class="pill-label">Memory Bank</span>
-                    <span class="pill-value" id="stat-memories">0</span>
-                </div>
-                <div class="stat-pill">
-                    <span class="pill-label">Observed Win Rate</span>
-                    <span class="pill-value highlight" id="stat-winrate">0.0%</span>
-                </div>
-                <div class="stat-pill">
-                    <span class="pill-label">Status</span>
-                    <span class="pill-value online">● ONLINE</span>
-                </div>
-            </div>
-        </header>
+    <header class="site-nav" data-public-ui>
+        <a class="brand-lockup" href="#home" aria-label="QuantEdge home">
+            <span class="brand-mark"><span></span><span></span><span></span></span>
+            <span class="brand-wordmark">QUANTEDGE</span>
+        </a>
+        <nav class="nav-links" aria-label="Primary navigation">
+            <a href="#product">Product</a>
+            <a href="#how-it-works">How it works</a>
+            <a href="#technology">Technology</a>
+            <a href="#memory">Memory</a>
+        </nav>
+        <div class="nav-actions">
+            <button class="nav-login" type="button" data-open-login>Login</button>
+            <button class="icon-button nav-enter" type="button" data-open-login aria-label="Enter QuantEdge"><i data-lucide="arrow-up-right"></i></button>
+        </div>
+    </header>
 
-        <!-- Chat: the primary interface -->
-        <section class="panel chat-panel">
-            <div class="panel-header">
-                <h2>💬 Talk to the Bot</h2>
-                <p>Ask for a signal, pick how long you'll hold it, then tell me how it went. A loss gets diagnosed from the candles before it's remembered.</p>
+    <main>
+        <section class="film-story" id="home" data-public-ui>
+            <div class="film-stage" aria-label="QuantEdge cinematic market intelligence sequence">
+                <video id="reveal-video" class="film-video film-video-primary" muted playsinline autoplay preload="auto" aria-hidden="true">
+                    <source src="/static/media/quantedge-reveal.mp4" type="video/mp4">
+                </video>
+                <video id="process-video" class="film-video film-video-secondary" muted playsinline preload="metadata" aria-hidden="true">
+                    <source src="/static/media/quantedge-process.mp4" type="video/mp4">
+                </video>
+                <div class="film-shade"></div>
+                <div class="film-grain" aria-hidden="true"></div>
+                <div class="film-grid" aria-hidden="true"></div>
+                <div class="stage-frame" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+                <div class="stage-meta">
+                    <span><i class="live-dot"></i> MARKET OBSERVATION NODE</span>
+                    <span id="film-timecode">00:00.00 / 00:08.00</span>
+                </div>
+                <div class="stage-index"><span id="active-chapter">01</span><i></i><span>04</span></div>
+                <div class="stage-progress"><span id="stage-progress-bar"></span></div>
             </div>
 
-            <div id="chat-log" class="chat-log" aria-live="polite" aria-label="Conversation">
-                <div class="chat-msg bot">
-                    <div class="bubble">
-                        <p>Ask me for a signal and pick a time limit. I'll give you the direction, the expiry clock, entry, stop, target and reward:risk.</p>
-                        <p>When the trade closes, tell me — "that won" or "that lost". A win I just file. A loss I measure first: I pull the closed candles from your entry to expiry, work out what actually happened, and record that as the reason.</p>
+            <div class="film-chapters" id="how-it-works">
+                <article class="story-chapter chapter-hero" data-chapter="01" data-video="reveal">
+                    <div class="chapter-copy hero-copy">
+                        <p class="eyebrow"><span>01</span> THE MARKET / UNFILTERED</p>
+                        <h1>The market speaks in noise.<br><em>QuantEdge listens for structure.</em></h1>
+                        <p>Live market data enters as movement, volatility, patterns, and contradiction. QuantEdge turns that complexity into an analysis you can inspect.</p>
+                        <div class="hero-actions">
+                            <button class="button button-primary" type="button" data-open-login>Enter QuantEdge <i data-lucide="arrow-up-right"></i></button>
+                            <a class="button button-quiet" href="#technology">Explore the system <i data-lucide="arrow-down"></i></a>
+                        </div>
                     </div>
-                </div>
-            </div>
+                    <div class="scroll-cue"><span>SCROLL TO ENTER THE SYSTEM</span><i data-lucide="arrow-down"></i></div>
+                </article>
 
-            <div class="chat-controls">
-                <label for="chat-time-limit">Time limit</label>
-                <select id="chat-time-limit" class="form-control chat-select">
-                    <option value="">Loading…</option>
-                </select>
-                <label for="chat-symbol">Symbol</label>
-                <input type="text" id="chat-symbol" class="form-control chat-symbol" value="BTCUSDT" maxlength="20" autocomplete="off">
-            </div>
+                <article class="story-chapter chapter-right" data-chapter="02" data-video="reveal">
+                    <div class="chapter-copy">
+                        <p class="eyebrow"><span>02</span> CHAOS → SIGNAL</p>
+                        <h2>Information is not understanding.</h2>
+                        <p>Prices move. Timeframes disagree. Indicators warm up at different speeds. QuantEdge first checks whether the underlying data is usable, then measures what is actually present.</p>
+                        <div class="chapter-points"><span>QUALITY GATE</span><span>CLOSED CANDLES</span><span>STRUCTURED EVIDENCE</span></div>
+                    </div>
+                </article>
 
-            <form id="chat-form" class="chat-form">
-                <input type="text" id="chat-input" class="form-control" maxlength="2000" autocomplete="off"
-                       placeholder="e.g. give me a signal on BTC — or: that one lost" required>
-                <button type="submit" id="btn-chat-send" class="btn btn-primary">Send</button>
-            </form>
+                <article class="story-chapter" data-chapter="03" data-video="process">
+                    <div class="chapter-copy">
+                        <p class="eyebrow"><span>03</span> THE AI / THINKING</p>
+                        <h2>Context before conclusion.</h2>
+                        <p>The numerical work happens in code. The reviewer sees verified context and can make the system more conservative, never invent the arithmetic.</p>
+                        <div class="thinking-sequence" aria-label="QuantEdge analysis pipeline">
+                            <span>DATA</span><i data-lucide="arrow-right"></i><span>CONTEXT</span><i data-lucide="arrow-right"></i><span>ANALYSIS</span><i data-lucide="arrow-right"></i><span>DECISION SUPPORT</span>
+                        </div>
+                    </div>
+                </article>
 
-            <div class="chat-quick">
-                <button type="button" class="btn-sm chip" data-msg="Give me a signal">Give me a signal</button>
-                <button type="button" class="btn-sm chip" data-msg="that one won">That one won</button>
-                <button type="button" class="btn-sm chip" data-msg="that one lost">That one lost</button>
-                <button type="button" class="btn-sm chip" data-msg="what have you learned">What have you learned</button>
-                <button type="button" class="btn-sm chip" data-msg="how are you doing">Performance</button>
-                <button type="button" class="btn-sm chip" data-msg="status">Status</button>
+                <article class="story-chapter chapter-right" data-chapter="04" data-video="process">
+                    <div class="chapter-copy">
+                        <p class="eyebrow"><span>04</span> MARKET UNDERSTANDING</p>
+                        <h2>One market. Multiple perspectives.</h2>
+                        <p>Execution, confirmation, and regime timeframes are read together. Agreement matters. Silence and contradiction remain visible instead of being forced into a trade.</p>
+                        <div class="timeframe-stack"><span><b>EXECUTION</b> Immediate structure</span><span><b>CONFIRMATION</b> Directional support</span><span><b>REGIME</b> Broader environment</span></div>
+                    </div>
+                </article>
             </div>
         </section>
 
-        <!-- Main Workspace -->
-        <main class="workspace-grid">
-            <!-- Left Panel: Trade Recommendation Engine -->
-            <section class="panel trade-generator-panel">
-                <div class="panel-header">
-                    <h2>🎯 AI Trade Recommendation Engine</h2>
-                    <p>Request memory-augmented trade setups with exact validity windows and risk management.</p>
+        <section class="market-band" id="technology" data-public-ui>
+            <div class="section-shell">
+                <div class="section-intro">
+                    <p class="eyebrow"><span>05</span> MULTI-MARKET INTELLIGENCE</p>
+                    <h2>Different markets.<br>One disciplined interface.</h2>
+                    <p>QuantEdge contains implemented provider pathways for crypto, forex, stocks and indices, and commodities. Availability depends on configured credentials and provider health.</p>
                 </div>
+                <div class="market-orbit" aria-label="Supported market categories">
+                    <div class="orbit-core"><span>QE</span><small>ANALYSIS CORE</small></div>
+                    <button type="button" class="market-node node-crypto" data-market="Crypto"><i></i><span>CRYPTO</span><small>BINANCE / TWELVE DATA</small></button>
+                    <button type="button" class="market-node node-forex" data-market="Forex"><i></i><span>FOREX</span><small>OANDA / TWELVE DATA</small></button>
+                    <button type="button" class="market-node node-index" data-market="Stocks & Indices"><i></i><span>STOCKS / INDICES</span><small>TWELVE DATA</small></button>
+                    <button type="button" class="market-node node-commodity" data-market="Commodities"><i></i><span>COMMODITIES</span><small>PROVIDER-DEPENDENT</small></button>
+                    <svg class="orbit-lines" viewBox="0 0 700 520" aria-hidden="true"><ellipse cx="350" cy="260" rx="285" ry="180"></ellipse><ellipse cx="350" cy="260" rx="205" ry="115"></ellipse><line x1="350" y1="260" x2="105" y2="125"></line><line x1="350" y1="260" x2="590" y2="130"></line><line x1="350" y1="260" x2="100" y2="395"></line><line x1="350" y1="260" x2="600" y2="390"></line></svg>
+                </div>
+            </div>
+        </section>
 
-                <form id="trade-form" class="trade-form">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label for="asset-class">Asset Class / Market</label>
-                            <select id="asset-class" class="form-control">
-                                <option value="crypto" selected>Crypto (Binance / Bybit)</option>
-                                <option value="forex">Forex (EUR/USD, GBP/USD)</option>
-                                <option value="commodity">Commodity (Gold, Crude Oil)</option>
-                                <option value="stock">Stocks / Indices (SPX, NASDAQ)</option>
-                            </select>
-                        </div>
+        <section class="layers-section" data-public-ui>
+            <div class="section-shell">
+                <div class="section-intro section-intro-wide">
+                    <p class="eyebrow"><span>06</span> ANALYSIS LAYERS</p>
+                    <h2>No single indicator gets the final word.</h2>
+                    <p>QuantEdge combines independent analytical layers around the same closed-candle series. Missing session or event context is reported as unavailable, never assumed.</p>
+                </div>
+                <div class="analysis-system">
+                    <div class="analysis-chart" aria-label="Illustrative market structure visualization">
+                        <div class="chart-grid"></div>
+                        <svg viewBox="0 0 800 430" role="img" aria-label="Demo chart showing layered analysis, not live prices">
+                            <polyline class="chart-line chart-line-muted" points="0,290 75,270 145,310 220,235 295,250 370,165 445,205 520,135 595,170 670,90 800,120"></polyline>
+                            <polyline class="chart-line chart-line-accent" points="0,330 75,315 145,325 220,275 295,280 370,220 445,235 520,180 595,200 670,145 800,155"></polyline>
+                            <line class="chart-level" x1="0" y1="170" x2="800" y2="170"></line>
+                            <line class="chart-level" x1="0" y1="280" x2="800" y2="280"></line>
+                        </svg>
+                        <span class="demo-label">ILLUSTRATIVE STRUCTURE / NOT LIVE DATA</span>
+                        <div class="chart-center"><span>MULTI-TIMEFRAME</span><strong>CONTEXT</strong></div>
+                    </div>
+                    <button class="layer-label layer-trend is-active" type="button" data-layer="Trend"><span>01</span>TREND</button>
+                    <button class="layer-label layer-momentum" type="button" data-layer="Momentum"><span>02</span>MOMENTUM</button>
+                    <button class="layer-label layer-volatility" type="button" data-layer="Volatility"><span>03</span>VOLATILITY</button>
+                    <button class="layer-label layer-structure" type="button" data-layer="Structure"><span>04</span>STRUCTURE</button>
+                    <button class="layer-label layer-regime" type="button" data-layer="Regime"><span>05</span>REGIME</button>
+                    <button class="layer-label layer-quality" type="button" data-layer="Quality"><span>06</span>DATA QUALITY</button>
+                </div>
+            </div>
+        </section>
 
-                        <div class="form-group">
-                            <label for="symbol">Currency / Pair Symbol</label>
-                            <input type="text" id="symbol" class="form-control" value="BTCUSDT" placeholder="e.g. BTCUSDT, EURUSD">
-                        </div>
+        <section class="memory-section" id="memory" data-public-ui>
+            <div class="memory-film"><video muted playsinline autoplay loop preload="metadata" aria-hidden="true"><source src="/static/media/quantedge-process.mp4" type="video/mp4"></video><div></div></div>
+            <div class="section-shell memory-content">
+                <div class="section-intro">
+                    <p class="eyebrow"><span>07</span> OUTCOME MEMORY</p>
+                    <h2>The system remembers what actually happened.</h2>
+                    <p>Settled decisions and user-reported outcomes can be stored with market context. Losses are diagnosed before rules are derived. This is structured memory, not automatic model retraining.</p>
+                </div>
+                <div class="memory-flow" aria-label="QuantEdge memory process">
+                    <div><span>PAST</span><small>Settled decisions</small></div><i data-lucide="arrow-down"></i>
+                    <div><span>OBSERVATIONS</span><small>Measured outcomes</small></div><i data-lucide="arrow-down"></i>
+                    <div><span>PATTERNS</span><small>Recurring causes</small></div><i data-lucide="arrow-down"></i>
+                    <div class="memory-current"><span>CURRENT CONTEXT</span><small>Relevant history consulted</small></div>
+                </div>
+            </div>
+        </section>
 
-                        <div class="form-group">
-                            <label for="time-limit">Time limit (how long you'll hold)</label>
-                            <select id="time-limit" class="form-control">
-                                <option value="">Loading…</option>
-                            </select>
+        <section class="product-section" id="product" data-public-ui>
+            <div class="section-shell">
+                <div class="product-heading">
+                    <div class="section-intro"><p class="eyebrow"><span>08</span> THE PRODUCT</p><h2>Cinematic intelligence.<br>Operational clarity.</h2></div>
+                    <p>The story resolves into a real workspace: scan control, structured recommendations, conversational analysis, outcome feedback, memory, and provider health.</p>
+                </div>
+                <div class="product-window" aria-label="QuantEdge real workspace preview">
+                    <div class="product-topbar"><span class="product-logo">QE</span><span>MARKET COMMAND DECK</span><small>WORKSPACE PREVIEW</small></div>
+                    <div class="product-layout">
+                        <aside><span class="active">OVERVIEW</span><span>MEMORY BANK</span><span>PROVIDERS</span></aside>
+                        <div class="product-main">
+                            <div class="product-controls"><label>ASSET CLASS<strong>CRYPTO / BINANCE</strong></label><label>SYMBOL<strong>BTCUSDT</strong></label><label>HOLD LIMIT<strong>15 MIN / 15M</strong></label><button type="button" data-open-login>OPEN WORKSPACE</button></div>
+                            <div class="product-panels"><div class="product-decision"><span><i class="live-dot"></i> DECISION SURFACE</span><strong>WAITING FOR INPUT</strong><div class="target-mark"><i data-lucide="crosshair"></i><b>Run a real scan inside the workspace.</b></div></div><div class="product-chat"><span>CONVERSATION</span><strong>Talk to QuantEdge</strong><p>Ask for a setup, performance context, provider status, or what the memory bank has learned.</p><div class="product-input">Message the market interface <i data-lucide="arrow-up"></i></div></div></div>
                         </div>
                     </div>
-
-                    <button type="submit" id="btn-generate" class="btn btn-primary btn-glow">
-                        <span class="btn-icon">✨</span> Generate Trade Setup
-                    </button>
-                </form>
-
-                <!-- Recommendation Output Card -->
-                <div id="recommendation-card" class="recommendation-card empty">
-                    <div class="empty-state">
-                        <div class="empty-icon">📊</div>
-                        <p>Click <strong>Generate Trade Setup</strong> to query market structure, multi-timeframe regime, and memory bank.</p>
-                    </div>
                 </div>
-            </section>
+            </div>
+        </section>
 
-            <!-- Right Panel: Memory Post-Mortem & Self-Correction -->
-            <section class="panel memory-panel">
-                <div class="panel-header">
-                    <h2>🧠 Post-Mortem & Memory System</h2>
-                    <p>Submit trade execution feedback. The bot analyzes why it won or lost and remembers it forever.</p>
+        <section class="control-section" data-public-ui>
+            <div class="control-line"><span>COMPLEXITY</span><i></i><span>STRUCTURE</span><i></i><span>CONTEXT</span><i></i><strong>CLARITY</strong></div>
+            <div class="section-shell control-content">
+                <p class="eyebrow"><span>CONTROL</span> HUMAN IN THE LOOP</p>
+                <h2>The system handles the complexity.<br><em>You keep the decision.</em></h2>
+                <p>QuantEdge produces analysis and recommendations. It does not place orders, control a wallet, or remove the trader from the final choice.</p>
+            </div>
+        </section>
+
+        <section class="final-cta" data-public-ui>
+            <video muted playsinline autoplay loop preload="metadata" aria-hidden="true"><source src="/static/media/quantedge-reveal.mp4" type="video/mp4"></video>
+            <div class="final-shade"></div>
+            <div class="final-content">
+                <p class="eyebrow"><span>09</span> QUANTEDGE / READY</p>
+                <h2>See the market<br>with more context.</h2>
+                <p>Enter the live analysis workspace and let the evidence decide whether a setup exists.</p>
+                <div class="hero-actions"><button class="button button-primary" type="button" data-open-login>Enter QuantEdge <i data-lucide="arrow-up-right"></i></button><a class="button button-quiet" href="#how-it-works">Replay the system <i data-lucide="rotate-ccw"></i></a></div>
+            </div>
+        </section>
+
+        <section class="workspace" id="workspace" hidden>
+            <header class="workspace-topbar">
+                <div class="workspace-title"><button class="icon-button" type="button" data-show-landing aria-label="Return to landing"><i data-lucide="arrow-left"></i></button><div><span class="eyebrow"><span>LIVE</span> WORKSPACE</span><h2>Market command deck</h2></div></div>
+                <div class="workspace-actions"><span class="workspace-clock" id="workspace-clock">--:--:-- UTC</span><button class="icon-button" type="button" data-logout aria-label="Log out"><i data-lucide="log-out"></i></button></div>
+            </header>
+            <div class="workspace-layout">
+                <aside class="workspace-rail"><div class="rail-label">NAVIGATION</div><button class="rail-link is-active" type="button" data-view="overview"><i data-lucide="activity"></i><span>Overview</span></button><button class="rail-link" type="button" data-view="memory"><i data-lucide="brain-circuit"></i><span>Memory bank</span></button><button class="rail-link" type="button" data-view="providers"><i data-lucide="radio-tower"></i><span>Providers</span></button><div class="rail-spacer"></div><div class="rail-footnote"><span class="live-dot"></span><span>ANALYSIS ONLINE<br><em>NO EXECUTION ACCESS</em></span></div></aside>
+                <div class="workspace-main">
+                    <section class="view-panel is-active" data-panel="overview">
+                        <div class="section-heading"><div><span class="eyebrow"><span>01</span> SCAN CONTROL</span><h3>Generate a market setup</h3></div><span class="section-meta">DETERMINISTIC PIPELINE</span></div>
+                        <form class="scan-form" id="trade-form"><label class="field"><span>ASSET CLASS</span><select id="asset-class"><option value="crypto">CRYPTO / BINANCE</option><option value="forex">FOREX</option><option value="commodity">COMMODITY</option><option value="stock">STOCK / INDEX</option></select></label><label class="field"><span>SYMBOL</span><input id="symbol" value="BTCUSDT" maxlength="20" autocomplete="off"></label><label class="field field-wide"><span>HOLD LIMIT</span><select id="time-limit"><option value="">Loading…</option></select></label><button class="button button-primary scan-submit" id="btn-generate" type="submit"><i data-lucide="scan-search"></i><span>Generate setup</span></button></form>
+                        <div class="overview-grid"><section class="decision-surface" id="recommendation-card"><div class="surface-kicker"><span><span class="live-dot"></span> DECISION SURFACE</span><span>WAITING FOR INPUT</span></div><div class="empty-decision"><i data-lucide="crosshair"></i><h4>Nothing issued yet.</h4><p>Run a scan to see the current evidence, validity window, risk levels, and memory context.</p></div></section><section class="chat-surface"><div class="surface-header"><div><span class="eyebrow"><span>02</span> CONVERSATION</span><h3>Talk to the bot</h3></div><span class="surface-code">SESSION / <b id="session-label">LOCAL</b></span></div><div class="chat-log" id="chat-log" aria-live="polite"><div class="chat-msg bot"><div class="chat-avatar">QE</div><div class="chat-bubble"><p>Ask for a setup, a performance readout, or what the memory bank has learned.</p></div></div></div><div class="chat-controls"><label class="field"><span>SYMBOL</span><input id="chat-symbol" value="BTCUSDT" maxlength="20"></label><label class="field"><span>LIMIT</span><select id="chat-time-limit"><option value="">Loading…</option></select></label></div><form class="chat-form" id="chat-form"><input id="chat-input" maxlength="2000" autocomplete="off" placeholder="e.g. give me a signal on BTC" required><button class="icon-button icon-button-accent" id="btn-chat-send" type="submit" aria-label="Send message"><i data-lucide="arrow-up"></i></button></form><div class="chat-quick"><button type="button" data-msg="Give me a signal">Signal</button><button type="button" data-msg="what have you learned">Memory</button><button type="button" data-msg="how are you doing">Performance</button><button type="button" data-msg="status">Status</button></div></section></div>
+                    </section>
+                    <section class="view-panel" data-panel="memory"><div class="section-heading"><div><span class="eyebrow"><span>02</span> MEMORY BANK</span><h3>Post-mortem and learned rules</h3></div><button class="button button-quiet" id="btn-refresh-memories" type="button"><i data-lucide="refresh-cw"></i> Refresh</button></div><div class="memory-summary"><div><span>TOTAL MEMORIES</span><strong id="stat-memories">—</strong></div><div><span>OBSERVED WIN RATE</span><strong id="stat-winrate">—</strong></div><div><span>CALIBRATED PROBABILITY</span><strong>NOT AVAILABLE</strong></div></div><div class="memory-layout"><section class="feedback-surface"><div class="surface-header"><div><span class="eyebrow"><span>FEEDBACK</span> SETTLEMENT INPUT</span><h3>Record an outcome</h3></div></div><form id="feedback-form" class="feedback-form"><label class="field"><span>SIGNAL ID</span><input id="fb-signal-id" required placeholder="rec-…"></label><label class="field"><span>OUTCOME</span><select id="fb-outcome"><option value="WIN">WIN</option><option value="LOSS">LOSS</option><option value="FLAT">FLAT</option><option value="VOID">VOID</option></select></label><label class="field"><span>SYMBOL</span><input id="fb-symbol" value="BTCUSDT"></label><label class="field field-full"><span>EXECUTION NOTES</span><input id="fb-notes" maxlength="2000" placeholder="Optional context from the trade"></label><button class="button button-primary" id="btn-feedback" type="submit"><i data-lucide="search-check"></i><span>Run post-mortem</span></button></form></section><section class="memory-list-surface"><div class="surface-header"><div><span class="eyebrow"><span>RECENT</span> OBSERVATIONS</span><h3>What the system remembers</h3></div></div><div id="memory-list" class="memory-list"><div class="empty-list">Memory records appear after settled outcomes.</div></div></section></div></section>
+                    <section class="view-panel" data-panel="providers"><div class="section-heading"><div><span class="eyebrow"><span>03</span> PROVIDER HEALTH</span><h3>Connected market sources</h3></div><button class="button button-quiet" type="button" id="btn-refresh-health"><i data-lucide="refresh-cw"></i> Refresh</button></div><div class="provider-grid" id="provider-grid"><div class="empty-list">Provider health will appear here after authentication.</div></div><div class="provider-note"><i data-lucide="shield-check"></i><p>QuantEdge is an analysis gateway. It has no order-placement, wallet, margin, or broker-login surface.</p></div></section>
                 </div>
+            </div>
+        </section>
+    </main>
 
-                <!-- Feedback Form -->
-                <div class="feedback-box">
-                    <h3>Submit Trade Execution Feedback</h3>
-                    <form id="feedback-form" class="feedback-form">
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="fb-signal-id">Signal ID</label>
-                                <input type="text" id="fb-signal-id" class="form-control" placeholder="e.g. rec-8f2a1b90" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="fb-outcome">Actual Outcome</label>
-                                <select id="fb-outcome" class="form-control">
-                                    <option value="WIN" selected>WIN (Target Hit)</option>
-                                    <option value="LOSS">LOSS (Stop Loss Hit)</option>
-                                    <option value="FLAT">FLAT (Breakeven)</option>
-                                </select>
-                            </div>
-                        </div>
+    <footer class="site-footer" data-public-ui><span>QUANTEDGE / AI MARKET INTELLIGENCE</span><span>ANALYSIS, NOT FINANCIAL ADVICE</span><span>© 2026 QUANTEDGE</span></footer>
 
-                        <div class="form-row">
-                            <div class="form-group">
-                                <label for="fb-symbol">Symbol</label>
-                                <input type="text" id="fb-symbol" class="form-control" value="BTCUSDT">
-                            </div>
-                            <div class="form-group">
-                                <label for="fb-notes">Execution Notes / Context</label>
-                                <input type="text" id="fb-notes" class="form-control" placeholder="e.g. Clean breakout after CPI news release">
-                            </div>
-                        </div>
-
-                        <button type="submit" id="btn-feedback" class="btn btn-secondary">
-                            <span class="btn-icon">⚡</span> Run AI Root-Cause Analysis & Save to Memory
-                        </button>
-                    </form>
-                </div>
-
-                <!-- Memory Log Bank -->
-                <div class="memory-log-box">
-                    <div class="memory-log-header">
-                        <h3>Memory Bank & Learned Rules</h3>
-                        <button id="btn-refresh-memories" class="btn-sm">🔄 Refresh</button>
-                    </div>
-                    <div id="memory-list" class="memory-list">
-                        <!-- Loaded dynamically -->
-                    </div>
-                </div>
-            </section>
-        </main>
+    <div class="login-layer" id="login-layer" hidden>
+        <div class="login-backdrop" data-close-login></div>
+        <section class="login-panel" role="dialog" aria-modal="true" aria-labelledby="login-title"><button class="icon-button login-close" type="button" data-close-login aria-label="Close login"><i data-lucide="x"></i></button><span class="eyebrow"><span>ACCESS</span> WORKSPACE GATE</span><h2 id="login-title">Enter the command deck.</h2><p>Use any operator name. The workspace password is the only credential checked.</p><form id="login-form"><label class="field"><span>OPERATOR NAME</span><input id="login-username" value="operator" autocomplete="username"></label><label class="field"><span>WORKSPACE PASSWORD</span><input id="login-password" type="password" autocomplete="current-password" required></label><button class="button button-primary login-submit" type="submit"><i data-lucide="unlock"></i><span>Unlock workspace</span></button><div class="login-error" id="login-error" role="alert"></div></form><div class="login-footnote"><span class="live-dot"></span> API ACCESS IS SCOPED TO THIS SESSION</div></section>
     </div>
 
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>

@@ -51,7 +51,14 @@ def create_app() -> FastAPI:
         challenge = Response(
             "Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"}
         )
-        if request.method == "OPTIONS":
+        # The public shell is viewable before login. API calls remain protected,
+        # so this changes only where authentication is requested, not what the
+        # market-analysis system can do.
+        if (
+            request.method == "OPTIONS"
+            or request.url.path == "/"
+            or request.url.path.startswith("/static/")
+        ):
             return await call_next(request)
 
         auth = request.headers.get("Authorization")
