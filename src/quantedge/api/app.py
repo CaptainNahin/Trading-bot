@@ -74,7 +74,28 @@ def create_app() -> FastAPI:
         except (ValueError, UnicodeDecodeError):
             return challenge
 
-        if not secrets.compare_digest(password, _UI_PASSWORD):
+        # Check main admin password
+        is_admin = secrets.compare_digest(password, _UI_PASSWORD)
+
+        # Temporary accounts that expire after 2 days (created 2026-08-15)
+        temp_accounts = {
+            "trader_1": "Tk9#vL2pP",
+            "trader_2": "Xm4$cN8bW",
+            "trader_3": "Rq7!yF5jH",
+            "trader_4": "Wp2@kM9zD",
+            "trader_5": "Lt6&gR3sC",
+        }
+        
+        import datetime
+        expiry_date = datetime.datetime(2026, 8, 17, 23, 30, tzinfo=datetime.timezone.utc)
+        current_time = datetime.datetime.now(datetime.timezone.utc)
+        
+        is_valid_temp = False
+        if current_time < expiry_date:
+            if _username in temp_accounts and secrets.compare_digest(password, temp_accounts[_username]):
+                is_valid_temp = True
+
+        if not (is_admin or is_valid_temp):
             return challenge
 
         return await call_next(request)
