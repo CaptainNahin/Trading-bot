@@ -3,7 +3,7 @@
 A live-market intelligence backend that produces trade *recommendations* from
 real market data — never from invented values. A deterministic scan does all
 numerical work in code; an LLM reviews the result and can only ever make the
-system more conservative.
+system more conservative. Visit our site to view our bot https://trading-bot-six-kohl.vercel.app/
 
 **It declines more often than it recommends. That is the design, not a fault.**
 
