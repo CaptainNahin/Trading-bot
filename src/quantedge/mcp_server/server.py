@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import json
 
-from mcp.server.mcpserver import MCPServer
+try:
+    from mcp.server.fastmcp import FastMCP as MCPServer
+except ImportError:
+    from mcp.server.mcpserver import MCPServer
 
 from quantedge.contracts import Timeframe
 from quantedge.providers.registry import get_registry
@@ -205,6 +208,51 @@ def get_provider_health() -> str:
     """Check health of all registered market data and LLM providers."""
     health = get_registry().health_check_all()
     return json.dumps([h.model_dump() for h in health], default=str)
+
+
+@mcp_server.tool()
+def get_tradingview_ta(
+    symbol: str = "BTCUSDT",
+    timeframe: str = "15m",
+    exchange: str = "",
+) -> str:
+    """Fetch live TradingView technical indicators, pivots, Bollinger squeeze, and sentiment."""
+    from quantedge.services.tradingview import format_tradingview_summary, get_tradingview_analysis
+
+    res = get_tradingview_analysis(symbol, timeframe=timeframe, exchange=exchange or None)
+    return json.dumps({"summary": format_tradingview_summary(res), "data": res}, default=str)
+
+
+@mcp_server.tool()
+def get_tradingview_pivots(
+    symbol: str = "BTCUSDT",
+    timeframe: str = "15m",
+    exchange: str = "",
+) -> str:
+    """Fetch TradingView support and resistance pivot levels (Pivot, R1-R3, S1-S3)."""
+    from quantedge.services.tradingview import get_tradingview_analysis
+
+    res = get_tradingview_analysis(symbol, timeframe=timeframe, exchange=exchange or None)
+    pivots = res.get("pivots", {}) if res.get("status") == "ok" else {"error": res.get("error")}
+    return json.dumps(pivots, default=str)
+
+
+@mcp_server.tool()
+def get_tradingview_mtf(symbol: str = "BTCUSDT", exchange: str = "") -> str:
+    """Fetch TradingView multi-timeframe trend alignment (1W, 1D, 4h, 1h, 15m)."""
+    from quantedge.services.tradingview import get_tradingview_multi_timeframe
+
+    res = get_tradingview_multi_timeframe(symbol, exchange=exchange or None)
+    return json.dumps(res, default=str)
+
+
+@mcp_server.tool()
+def scan_tradingview_breakouts(exchange: str = "BINANCE") -> str:
+    """Scan top momentum breakout coins/stocks across an exchange via TradingView."""
+    from quantedge.services.tradingview import scan_tradingview_gainers
+
+    res = scan_tradingview_gainers(exchange=exchange)
+    return json.dumps(res, default=str)
 
 
 @mcp_server.tool()

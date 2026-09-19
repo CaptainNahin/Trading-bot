@@ -9,6 +9,16 @@
       "env": {
         "PYTHONPATH": "D:\\trading bot\\src"
       }
+    },
+    "tradingview-mcp": {
+      "command": "D:\\trading bot\\.venv\\Scripts\\python.exe",
+      "args": [
+        "-m",
+        "tradingview_mcp.server"
+      ],
+      "env": {
+        "PYTHONPATH": "D:\\trading bot\\src"
+      }
     }
   }
 }

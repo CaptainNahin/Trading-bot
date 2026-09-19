@@ -71,6 +71,7 @@ class Intent(str, Enum):
     PERFORMANCE = "PERFORMANCE"
     TIME_LIMITS = "TIME_LIMITS"
     STATUS = "STATUS"
+    TRADINGVIEW = "TRADINGVIEW"
     HELP = "HELP"
     UNKNOWN = "UNKNOWN"
 
@@ -155,6 +156,10 @@ _STATUS_WORDS = re.compile(
     r"\b(status|health|providers?|are\s+you\s+(ok|online|working)|connected)\b",
     re.IGNORECASE,
 )
+_TRADINGVIEW_WORDS = re.compile(
+    r"\b(tradingview|tv\b|trading\s*view)\b",
+    re.IGNORECASE,
+)
 _HELP_WORDS = re.compile(r"\b(help|what\s+can\s+you\s+do|commands?|how\s+do\s+i)\b", re.IGNORECASE)
 
 # "10 min", "10m", "20 minutes", "1 hour", "1h". The unit is required so a bare
@@ -230,6 +235,8 @@ def parse_intent(message: str) -> ChatIntent:
         return ChatIntent(Intent.TIME_LIMITS)
     if _STATUS_WORDS.search(text):
         return ChatIntent(Intent.STATUS)
+    if _TRADINGVIEW_WORDS.search(text):
+        return ChatIntent(Intent.TRADINGVIEW, symbol=symbol, minutes=minutes, notes=text)
     if _SIGNAL_WORDS.search(text) or (symbol is not None and minutes is not None):
         return ChatIntent(Intent.SIGNAL, symbol=symbol, minutes=minutes)
     if _HELP_WORDS.search(text):
@@ -300,6 +307,8 @@ def handle_message(
         return _handle_signal(parsed, default_symbol, default_minutes, state)
     if parsed.intent is Intent.REPORT_OUTCOME:
         return _handle_outcome(parsed, state)
+    if parsed.intent is Intent.TRADINGVIEW:
+        return _handle_tradingview(parsed, default_symbol)
     if parsed.intent is Intent.MEMORY:
         return _handle_memory(parsed)
     if parsed.intent is Intent.PERFORMANCE:
@@ -403,8 +412,30 @@ def _handle_signal(
     payload["time_limit_minutes"] = minutes_used
     state["last_recommendation"] = payload
 
+    tv_note = ""
+    try:
+        from quantedge.services.tradingview import get_tradingview_analysis
+
+        tv_data = get_tradingview_analysis(rec.symbol, timeframe="15m")
+        if tv_data.get("status") == "ok":
+            pivots = tv_data.get("pivots", {})
+            bb = tv_data.get("bollinger_bands", {})
+            tv_lines = ["", "TradingView Institutional Context:"]
+            if pivots.get("pivot"):
+                tv_lines.append(f"  Pivot: {pivots.get('pivot')} | S1: {pivots.get('s1')} | R1: {pivots.get('r1')}")
+            if bb.get("squeeze"):
+                tv_lines.append("  Bollinger Squeeze: ACTIVE (breakout pending)")
+            if tv_data.get("sentiment", {}).get("signal"):
+                tv_lines.append(
+                    f"  TV Consensus: {tv_data['sentiment']['signal']} (Rating: {tv_data['sentiment'].get('rating', '')})"
+                )
+            tv_note = "\n" + "\n".join(tv_lines)
+            payload["tradingview"] = tv_data
+    except Exception:
+        pass
+
     return ChatReply(
-        text=_format_recommendation(rec, minutes_used, expiry) + assumption_note,
+        text=_format_recommendation(rec, minutes_used, expiry) + tv_note + assumption_note,
         intent=Intent.SIGNAL,
         data=payload,
         warnings=list(rec.warnings),
@@ -973,6 +1004,28 @@ def _handle_status() -> ChatReply:
     except QuantEdgeError as exc:
         rows.append({"provider": "registry", "status": "error", "message": exc.message})
 
+    # TradingView MCP status
+    try:
+        from quantedge.services.tradingview import resolve_tradingview_target
+
+        rows.append(
+            {
+                "provider": "tradingview",
+                "kind": "mcp_intelligence",
+                "status": "online",
+                "message": "public technical analysis, pivots, and breakout scanner active",
+            }
+        )
+    except Exception as exc:
+        rows.append(
+            {
+                "provider": "tradingview",
+                "kind": "mcp_intelligence",
+                "status": "degraded",
+                "message": str(exc),
+            }
+        )
+
     llm_row: dict[str, Any]
     provider = default_llm_provider()
     if provider is None:
@@ -1020,6 +1073,140 @@ def _handle_status() -> ChatReply:
     )
 
 
+def _handle_tradingview(
+    parsed: ChatIntent,
+    default_symbol: str,
+) -> ChatReply:
+    """Query TradingView MCP connector for institutional analysis, pivots, and screeners."""
+    from quantedge.services.tradingview import (
+        format_tradingview_summary,
+        get_tradingview_analysis,
+        get_tradingview_multi_timeframe,
+        scan_tradingview_gainers,
+    )
+
+    text_lower = (parsed.notes or "").lower()
+    symbol = parsed.symbol
+
+    # 1. Breakout / Gainers screener request
+    if any(word in text_lower for word in ("scan", "breakout", "screener", "gainer", "gainers")):
+        exchange = "BINANCE"
+        if "oanda" in text_lower or "forex" in text_lower or "fx" in text_lower:
+            exchange = "OANDA"
+        elif "nasdaq" in text_lower or "stock" in text_lower:
+            exchange = "NASDAQ"
+
+        gainers = scan_tradingview_gainers(exchange)
+        if not gainers:
+            return ChatReply(
+                text=(
+                    f"TradingView Breakout Scanner ({exchange}): "
+                    "No current breakout candidates triggered threshold."
+                ),
+                intent=Intent.TRADINGVIEW,
+                data={"scanner": exchange, "results": []},
+            )
+
+        lines = [f"**TradingView Breakout & Volume Scanner ({exchange}) Top Results:**"]
+        for idx, item in enumerate(gainers[:8], 1):
+            s = item.get("symbol", "N/A")
+            price = item.get("price") or item.get("close", "N/A")
+            chg = item.get("change") or item.get("change_pct", "N/A")
+            vol = item.get("volume") or item.get("relative_volume", "N/A")
+            lines.append(f"{idx}. **{s}** -- Price: {price} | Change: {chg}% | Vol: {vol}")
+        lines.append("\nQuery `tv <symbol>` to run full technical analysis on any coin.")
+        return ChatReply(
+            text="\n".join(lines),
+            intent=Intent.TRADINGVIEW,
+            data={"scanner": exchange, "results": gainers},
+        )
+
+    # 2. Multi-Timeframe consensus request
+    if symbol and any(word in text_lower for word in ("mtf", "multi", "consensus")):
+        mtf_data = get_tradingview_multi_timeframe(symbol)
+        if mtf_data.get("status") != "ok":
+            err_msg = mtf_data.get("error", "unknown")
+            return ChatReply(
+                text=f"TradingView MTF analysis for {symbol} failed: {err_msg}",
+                intent=Intent.TRADINGVIEW,
+                data=mtf_data,
+                warnings=[str(err_msg)],
+            )
+
+        sym = mtf_data.get("symbol")
+        venue = mtf_data.get("exchange")
+        align = mtf_data.get("alignment")
+        rec = mtf_data.get("recommendation")
+        tfs = mtf_data.get("timeframes", {})
+
+        lines = [
+            f"**TradingView Multi-Timeframe Consensus [{sym} on {venue}]:**",
+            f"- **Alignment:** {align} | **Overall Recommendation:** {rec}",
+            "- **Timeframe Breakdown:**",
+        ]
+        for tf_name, tf_val in tfs.items():
+            if isinstance(tf_val, dict):
+                rating = tf_val.get("rating", "N/A")
+                score = tf_val.get("score", "N/A")
+                lines.append(f"  - **{tf_name}:** Rating {rating} (Score {score})")
+            else:
+                lines.append(f"  - **{tf_name}:** {tf_val}")
+
+        return ChatReply(
+            text="\n".join(lines),
+            intent=Intent.TRADINGVIEW,
+            data=mtf_data,
+        )
+
+    # 3. Standard TA and Pivot Point lookup for symbol
+    target_sym = symbol or default_symbol or "BTCUSDT"
+    timeframe = "15m"
+    if parsed.minutes:
+        if parsed.minutes <= 1:
+            timeframe = "1m"
+        elif parsed.minutes <= 5:
+            timeframe = "5m"
+        elif parsed.minutes <= 15:
+            timeframe = "15m"
+        elif parsed.minutes <= 30:
+            timeframe = "30m"
+        elif parsed.minutes <= 60:
+            timeframe = "1h"
+        elif parsed.minutes <= 120:
+            timeframe = "2h"
+        elif parsed.minutes <= 240:
+            timeframe = "4h"
+        else:
+            timeframe = "1D"
+    elif "1h" in text_lower or "60m" in text_lower:
+        timeframe = "1h"
+    elif "4h" in text_lower:
+        timeframe = "4h"
+    elif "1d" in text_lower or "daily" in text_lower:
+        timeframe = "1D"
+    elif "5m" in text_lower:
+        timeframe = "5m"
+    elif "1w" in text_lower or "weekly" in text_lower:
+        timeframe = "1W"
+
+    analysis = get_tradingview_analysis(target_sym, timeframe=timeframe)
+    if analysis.get("status") != "ok":
+        err_msg = analysis.get("error", "unknown error")
+        return ChatReply(
+            text=f"TradingView analysis for {target_sym} is currently unavailable: {err_msg}",
+            intent=Intent.TRADINGVIEW,
+            data=analysis,
+            warnings=[str(err_msg)],
+        )
+
+    summary_text = format_tradingview_summary(analysis)
+    return ChatReply(
+        text=summary_text,
+        intent=Intent.TRADINGVIEW,
+        data=analysis,
+    )
+
+
 def _handle_help(intent: Intent) -> ChatReply:
     """What the bot does, phrased as the sentences that actually work."""
     limits = ", ".join(limit.label for limit in available_time_limits())
@@ -1029,6 +1216,10 @@ def _handle_help(intent: Intent) -> ChatReply:
         '  Get a signal        "BTC 10 min", "give me a signal on gold, 30 minutes"\n'
         "                      I answer with UP or DOWN, the entry, an expiry clock,\n"
         "                      a stop, a target and the reward:risk behind them.\n"
+        "\n"
+        '  TradingView TA      "tv btc", "tradingview gold 1h", "tv pivots sol"\n'
+        '  Breakout screener   "tv breakouts", "tv scan"\n'
+        '  MTF consensus       "tv mtf btc"\n'
         "\n"
         '  Report an outcome   "that one won", "the BTC trade lost"\n'
         "                      A win I just file. A loss I diagnose first: I pull the\n"
