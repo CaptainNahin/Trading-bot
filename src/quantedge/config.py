@@ -192,7 +192,8 @@ class Settings(BaseSettings):
         if self.api_auth_token is None:
             problems.append("API_AUTH_TOKEN is required in production")
         if self.database_url is None and not self.supabase_url:
-            problems.append("DATABASE_URL (or Supabase) is required in production")
+            if not self.sqlite_path:
+                problems.append("DATABASE_URL, Supabase, or SQLITE_PATH is required in production")
         if self.log_level.upper() == "DEBUG":
             problems.append("LOG_LEVEL=DEBUG is not permitted in production")
         if problems:
@@ -234,7 +235,8 @@ class Settings(BaseSettings):
         dsn = self.secret(self.database_url)
         if dsn:
             return dsn
-        path = PROJECT_ROOT / self.sqlite_path
+        raw_path = Path(self.sqlite_path)
+        path = raw_path if raw_path.is_absolute() else (PROJECT_ROOT / raw_path)
         path.parent.mkdir(parents=True, exist_ok=True)
         return f"sqlite+pysqlite:///{path.as_posix()}"
 

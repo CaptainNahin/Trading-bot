@@ -21,6 +21,7 @@ history is the one thing in this system that must not be reconstructable-by-luck
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from quantedge.config import get_settings
@@ -115,6 +116,45 @@ def get_repository(*, force_memory: bool = False) -> SqlRepository | MemoryRepos
         log.info("repository ready", extra={"mode": _mode, "durable": True})
         return _repository
     except Exception as exc:
+        is_serverless = bool(os.getenv("VERCEL") or "tmp" in settings.sqlite_path.lower())
+        if is_serverless:
+            log.warning(
+                "primary database connection failed in serverless; falling back to SQLite persistence",
+                extra={"error": str(exc), "primary_mode": settings.persistence_mode},
+            )
+            try:
+                from pathlib import Path
+                from sqlalchemy.orm import sessionmaker
+                from quantedge.config import PROJECT_ROOT
+                from quantedge.repositories.database import create_all, make_engine, reset_engine
+                from quantedge.repositories.sql import SqlRepository
+                import quantedge.repositories.database as db_mod
+
+                reset_engine()
+                raw_path = Path(settings.sqlite_path)
+                sqlite_file = raw_path if raw_path.is_absolute() else (PROJECT_ROOT / raw_path)
+                sqlite_file.parent.mkdir(parents=True, exist_ok=True)
+                fallback_dsn = f"sqlite+pysqlite:///{sqlite_file.as_posix()}"
+                fallback_engine = make_engine(fallback_dsn)
+                create_all(fallback_engine)
+
+                db_mod._engine = fallback_engine
+                db_mod._factory = sessionmaker(
+                    bind=fallback_engine,
+                    expire_on_commit=False,
+                    autoflush=False,
+                )
+
+                _repository = SqlRepository(factory=db_mod._factory)
+                _mode = "sqlite"
+                log.info(
+                    "resilient fallback repository ready",
+                    extra={"mode": _mode, "durable": True, "path": str(sqlite_file)},
+                )
+                return _repository
+            except Exception as fallback_exc:
+                log.error("serverless SQLite fallback failed", extra={"error": str(fallback_exc)})
+
         if settings.app_env == "production":
             raise PersistenceError(
                 "database is unreachable and in-memory fallback is refused in production; "
