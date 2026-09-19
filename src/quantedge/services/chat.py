@@ -72,6 +72,7 @@ class Intent(str, Enum):
     TIME_LIMITS = "TIME_LIMITS"
     STATUS = "STATUS"
     TRADINGVIEW = "TRADINGVIEW"
+    LIFECYCLE = "LIFECYCLE"
     HELP = "HELP"
     UNKNOWN = "UNKNOWN"
 
@@ -160,6 +161,10 @@ _TRADINGVIEW_WORDS = re.compile(
     r"\b(tradingview|tv\b|trading\s*view)\b",
     re.IGNORECASE,
 )
+_LIFECYCLE_WORDS = re.compile(
+    r"\b(lifecycle|monitor|in\s*flight|open\s+trades?|open\s+signals?|active\s+trades?|active\s+signals?|settle\s+due|settle)\b",
+    re.IGNORECASE,
+)
 _HELP_WORDS = re.compile(r"\b(help|what\s+can\s+you\s+do|commands?|how\s+do\s+i)\b", re.IGNORECASE)
 
 # "10 min", "10m", "20 minutes", "1 hour", "1h". The unit is required so a bare
@@ -237,6 +242,8 @@ def parse_intent(message: str) -> ChatIntent:
         return ChatIntent(Intent.STATUS)
     if _TRADINGVIEW_WORDS.search(text):
         return ChatIntent(Intent.TRADINGVIEW, symbol=symbol, minutes=minutes, notes=text)
+    if _LIFECYCLE_WORDS.search(text):
+        return ChatIntent(Intent.LIFECYCLE, symbol=symbol)
     if _SIGNAL_WORDS.search(text) or (symbol is not None and minutes is not None):
         return ChatIntent(Intent.SIGNAL, symbol=symbol, minutes=minutes)
     if _HELP_WORDS.search(text):
@@ -303,12 +310,22 @@ def handle_message(
     parsed = parse_intent(message)
     state = session if session is not None else {}
 
+    # Run background check to automatically settle finished signals (TP/SL/expiry)
+    try:
+        from quantedge.services.lifecycle import monitor_and_settle_active_signals
+
+        monitor_and_settle_active_signals()
+    except Exception:
+        pass
+
     if parsed.intent is Intent.SIGNAL:
         return _handle_signal(parsed, default_symbol, default_minutes, state)
     if parsed.intent is Intent.REPORT_OUTCOME:
         return _handle_outcome(parsed, state)
     if parsed.intent is Intent.TRADINGVIEW:
         return _handle_tradingview(parsed, default_symbol)
+    if parsed.intent is Intent.LIFECYCLE:
+        return _handle_lifecycle()
     if parsed.intent is Intent.MEMORY:
         return _handle_memory(parsed)
     if parsed.intent is Intent.PERFORMANCE:
@@ -1204,6 +1221,60 @@ def _handle_tradingview(
         text=summary_text,
         intent=Intent.TRADINGVIEW,
         data=analysis,
+    )
+
+
+def _handle_lifecycle() -> ChatReply:
+    """Monitor in-flight trades, check for TP/SL hits or expiries, and report status."""
+    from quantedge.services.lifecycle import monitor_and_settle_active_signals
+
+    report = monitor_and_settle_active_signals()
+    lines = ["**Autonomous Signal Lifecycle & Trade Monitor:**", ""]
+
+    settled = report.get("settled_details") or []
+    active = report.get("active_details") or []
+
+    if settled:
+        lines.append(f"**Newly Resolved & Settled Trades ({len(settled)}):**")
+        for s in settled:
+            outcome_label = (
+                "✅ WIN"
+                if s["outcome"] == "WIN"
+                else ("❌ LOSS" if s["outcome"] == "LOSS" else "⚖️ FLAT")
+            )
+            lines.append(f"- **{s['symbol']}** ({s['direction']}): {outcome_label}")
+            lines.append(f"  Entry: {s['reference_price']} | Exit: {s['exit_price']}")
+            lines.append(f"  Outcome Reason: {s['reason']}")
+        lines.append("")
+
+    if active:
+        lines.append(f"**Active In-Flight Positions ({len(active)}):**")
+        for a in active:
+            pnl = a["unrealized_pnl_pct"]
+            pnl_str = f"+{pnl:.2f}%" if pnl >= 0 else f"{pnl:.2f}%"
+            lines.append(
+                f"- **{a['symbol']}** ({a['direction']} {a['horizon']}) | Unrealized PnL: {pnl_str} | Remaining: ~{a['remaining_minutes']}m"
+            )
+            lines.append(
+                f"  Entry: {a['reference_price']} | Current: {a['current_price']} | SL: {a['stop_loss']} | TP: {a['take_profit']}"
+            )
+        lines.append("")
+
+    if not settled and not active:
+        lines.append(
+            "No signals currently in flight. Ask for a trade (e.g. `BTC 15m`) to start tracking."
+        )
+
+    lines.append("")
+    lines.append(
+        "Signals are automatically tracked until resolution (TP hit, SL hit, or expiry), "
+        "and lessons learned are autonomously stored in the Memory Bank to improve future accuracy."
+    )
+
+    return ChatReply(
+        text="\n".join(lines).strip(),
+        intent=Intent.LIFECYCLE,
+        data=report,
     )
 
 

@@ -43,6 +43,15 @@ def build_signal_context(
     if event_risk is None:
         missing_info.append("Economic event risk report not available")
 
+    # Pull memory bank rules derived from past losses on this asset & horizon
+    learned_rules: list[str] = []
+    try:
+        from quantedge.services.memory import recurring_loss_rules
+
+        learned_rules = recurring_loss_rules(candidate.symbol, horizon=candidate.horizon)
+    except Exception:
+        pass
+
     # Force calibration model flag to False per system rules
     return SignalContext(
         generated_at_utc=utc_now(),
@@ -59,6 +68,7 @@ def build_signal_context(
         heuristic_score=candidate.heuristic_score,
         supporting_evidence=candidate.supporting_evidence,
         contradictory_evidence=candidate.contradictory_evidence,
+        learned_rules=learned_rules,
         missing_information=missing_info,
         calibration_model_available=False,
     )

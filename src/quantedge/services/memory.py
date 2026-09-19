@@ -188,6 +188,42 @@ def record_trade_outcome_and_analyze(
             entry_features=entry_features,
             exit_features=exit_features,
         )
+        # Augment with AI Brain post-mortem if an LLM reviewer is configured and loss was diagnosable
+        if mortem is not None:
+            try:
+                from quantedge.providers.llm import default_llm_provider
+
+                provider = default_llm_provider()
+                if provider is not None and hasattr(provider, "analyze_loss_postmortem"):
+                    candle_summary = None
+                    if holding_candles:
+                        candle_summary = (
+                            f"{len(holding_candles)} bars. Open: {holding_candles[0].open}, "
+                            f"High: {max(c.high for c in holding_candles)}, "
+                            f"Low: {min(c.low for c in holding_candles)}, "
+                            f"Close: {holding_candles[-1].close}"
+                        )
+                    ai_postmortem = provider.analyze_loss_postmortem(
+                        symbol=symbol,
+                        direction=dir_enum.value if dir_enum else "UNKNOWN",
+                        reference_price=reference_price,
+                        exit_price=exit_price if exit_price is not None else _exit_of(mortem),
+                        stop=stop,
+                        target=target,
+                        detected_causes=[c.code for c in mortem.causes] if mortem else None,
+                        candle_summary=candle_summary,
+                    )
+                    ai_cause = ai_postmortem.get("root_cause")
+                    if ai_cause:
+                        root_cause = f"{root_cause} | AI Post-Mortem: {ai_cause}"
+                    for r in ai_postmortem.get("do_rules", []):
+                        if r and r not in do_rules:
+                            do_rules.append(r)
+                    for r in ai_postmortem.get("dont_rules", []):
+                        if r and r not in dont_rules:
+                            dont_rules.append(r)
+            except Exception as exc:
+                log.debug("ai post-mortem skipped", extra={"error": str(exc)})
     else:
         root_cause = (
             f"{symbol} settled {out_enum.value} on the {horizon} horizon: the "

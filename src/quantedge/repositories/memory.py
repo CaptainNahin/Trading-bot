@@ -474,16 +474,10 @@ class MemoryRepository:
                 )
             self._settled.append(settled)
 
-    def unsettled_expired_signals(self, *, limit: int = 100) -> list[AIDecision]:
-        """Signals past expiry with no settlement row yet.
-
-        Mirrors the SQL backend, including the skip on a missing or unreadable
-        ``expiry_utc``: the worker must behave the same whichever backend is
-        configured, or a bug would only reproduce on one of them.
-
-        This backend stores ``llm_response`` as the object it was handed rather
-        than as JSON, so both a contract instance and a plain dict are accepted.
-        """
+    def unsettled_signals(
+        self, *, include_unexpired: bool = False, limit: int = 100
+    ) -> list[AIDecision]:
+        """Signals with no settlement row yet."""
         now = utc_now()
         with self._lock:
             settled_ids = {s.signal_id for s in self._settled}
@@ -500,7 +494,9 @@ class MemoryRepository:
             if not expiry or direction is None:
                 continue
             parsed = expiry if isinstance(expiry, datetime) else _parse_utc(str(expiry))
-            if parsed is None or parsed > now:
+            if parsed is None:
+                continue
+            if not include_unexpired and parsed > now:
                 continue
             raw_price = data.get("reference_price")
             price: Decimal | None = None
@@ -516,10 +512,15 @@ class MemoryRepository:
                     direction=SignalDirection(direction),
                     reference_price=price,
                     expiry_utc=parsed,
+                    created_at_utc=row.get("signal_time_utc") or now,
                 )
             )
         due.sort(key=lambda d: d.expiry_utc or now)
         return due[: max(1, limit)]
+
+    def unsettled_expired_signals(self, *, limit: int = 100) -> list[AIDecision]:
+        """Signals past expiry with no settlement row yet."""
+        return self.unsettled_signals(include_unexpired=False, limit=limit)
 
     def settled_signals(
         self, *, symbol: str | None = None, horizon: str | None = None, limit: int = 100

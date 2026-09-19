@@ -282,6 +282,30 @@ def get_bot_memory_stats() -> dict[str, Any]:
         return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
 
 
+@router.post("/bot/settle-due")
+def post_settle_due() -> dict[str, Any]:
+    """Autonomous lifecycle pass: monitor open trades, check TP/SL hits or expiry, and settle."""
+    try:
+        from quantedge.services.lifecycle import monitor_and_settle_active_signals
+
+        return monitor_and_settle_active_signals()
+    except Exception as exc:
+        log.exception("settle-due pass failed")
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
+@router.get("/bot/active-signals")
+def get_bot_active_signals() -> dict[str, Any]:
+    """Retrieve all open, in-flight signals currently being monitored."""
+    try:
+        from quantedge.services.lifecycle import get_active_signals_summary
+
+        return get_active_signals_summary()
+    except Exception as exc:
+        log.exception("active-signals lookup failed")
+        return {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+
 # ------------------------------------------------------------------ #
 # Chat                                                                #
 # ------------------------------------------------------------------ #

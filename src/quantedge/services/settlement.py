@@ -26,6 +26,9 @@ def settle_decision(
     closed_candles: Sequence[Candle],
     *,
     settlement_provider: str = "binance",
+    outcome: SettlementOutcome | None = None,
+    settlement_price: Decimal | None = None,
+    notes: list[str] | None = None,
 ) -> SettledSignal | None:
     """Evaluate settlement for an AIDecision using closed candles.
 
@@ -46,7 +49,8 @@ def settle_decision(
         that were not in the database.
     """
     if (
-        decision.status != SignalStatus.SIGNAL
+        decision is None
+        or decision.status != SignalStatus.SIGNAL
         or not decision.direction
         or not decision.reference_price
     ):
@@ -61,25 +65,30 @@ def settle_decision(
     if decision.expiry_utc is None:
         return None
 
-    settlement_price = closed_candles[-1].close
+    final_price = settlement_price if settlement_price is not None else closed_candles[-1].close
     ref_price = decision.reference_price
 
-    if decision.direction == SignalDirection.UP:
-        if settlement_price > ref_price:
-            outcome = SettlementOutcome.WIN
-        elif settlement_price < ref_price:
-            outcome = SettlementOutcome.LOSS
+    if outcome is None:
+        if decision.direction == SignalDirection.UP:
+            if final_price > ref_price:
+                derived_outcome = SettlementOutcome.WIN
+            elif final_price < ref_price:
+                derived_outcome = SettlementOutcome.LOSS
+            else:
+                derived_outcome = SettlementOutcome.FLAT
+        elif decision.direction == SignalDirection.DOWN:
+            if final_price < ref_price:
+                derived_outcome = SettlementOutcome.WIN
+            elif final_price > ref_price:
+                derived_outcome = SettlementOutcome.LOSS
+            else:
+                derived_outcome = SettlementOutcome.FLAT
         else:
-            outcome = SettlementOutcome.FLAT
-    elif decision.direction == SignalDirection.DOWN:
-        if settlement_price < ref_price:
-            outcome = SettlementOutcome.WIN
-        elif settlement_price > ref_price:
-            outcome = SettlementOutcome.LOSS
-        else:
-            outcome = SettlementOutcome.FLAT
+            derived_outcome = SettlementOutcome.FLAT
     else:
-        outcome = SettlementOutcome.FLAT
+        derived_outcome = outcome
+
+    settled_notes = notes if notes is not None else [f"Settled against closing price {final_price}"]
 
     settled = SettledSignal(
         signal_id=decision.decision_id or "unknown",
@@ -87,12 +96,12 @@ def settle_decision(
         horizon=decision.horizon,
         direction=decision.direction,
         reference_price=ref_price,
-        settlement_price=settlement_price,
-        outcome=outcome,
+        settlement_price=final_price,
+        outcome=derived_outcome,
         expiry_utc=decision.expiry_utc,
         settled_at_utc=utc_now(),
         settlement_provider=settlement_provider,
-        notes=[f"Settled against closing price {settlement_price}"],
+        notes=settled_notes,
     )
 
     get_repository().settle_signal(settled)

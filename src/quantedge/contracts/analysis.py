@@ -519,6 +519,7 @@ class SignalContext(_Model):
     supporting_evidence: list[str] = Field(default_factory=list)
     contradictory_evidence: list[str] = Field(default_factory=list)
     historical_statistics: dict[str, Any] | None = None
+    learned_rules: list[str] = Field(default_factory=list)
     missing_information: list[str] = Field(default_factory=list)
 
     calibration_model_available: bool = False

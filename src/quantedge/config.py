@@ -41,7 +41,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_DIR = PROJECT_ROOT / "config"
 
 AppEnv = Literal["development", "staging", "production"]
-LLMProviderName = Literal["agentrouter", "anthropic", "gemini", "disabled"]
+LLMProviderName = Literal["agentrouter", "anthropic", "gemini", "seekai", "disabled"]
 
 # Binance REST hosts this gateway may talk to. All serve the same public
 # market-data API; the allowlist exists so a typo or an edited environment
@@ -110,6 +110,10 @@ class Settings(BaseSettings):
     anthropic_model: str = "claude-sonnet-4-5"
     gemini_api_key: SecretStr | None = None
     gemini_model: str = "gemini-3.1-pro-preview"
+    seekai_api_key: SecretStr | None = None
+    seekai_base_url: str = "https://seekai.cc/v1"
+    seekai_model: str = "glm-5.3"
+    seekai_fallback_model: str = "deepseek-v4-flash"
     # How long to wait for a review before abandoning it and shipping the
     # deterministic candidate unreviewed. The default suits a long-lived
     # process. A serverless host kills the whole request at its own ceiling,
@@ -267,6 +271,7 @@ class Settings(BaseSettings):
             "AGENTROUTER_API_KEY": self.secret(self.agentrouter_api_key) is not None,
             "ANTHROPIC_API_KEY": self.secret(self.anthropic_api_key) is not None,
             "GEMINI_API_KEY": self.secret(self.gemini_api_key) is not None,
+            "SEEKAI_API_KEY": self.secret(self.seekai_api_key) is not None,
             "DATABASE_URL": self.secret(self.database_url) is not None,
             "SUPABASE_SERVICE_ROLE_KEY": self.secret(self.supabase_service_role_key) is not None,
         }

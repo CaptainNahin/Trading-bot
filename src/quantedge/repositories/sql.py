@@ -917,16 +917,13 @@ class SqlRepository:
                 details={"signal_id": settled.signal_id},
             ) from exc
 
-    def unsettled_expired_signals(self, *, limit: int = 100) -> list[AIDecision]:
-        """Signals whose expiry has passed and which have no settlement row yet.
+    def unsettled_signals(
+        self, *, include_unexpired: bool = False, limit: int = 100
+    ) -> list[AIDecision]:
+        """Signals with no settlement row yet.
 
-        The anti-join against ``settled_signals`` is what keeps the settlement
-        worker idempotent: a signal already scored is not a candidate, so a
-        restarted worker cannot re-score a closed trade.
-
-        A row whose stored JSON has no ``expiry_utc`` is skipped rather than
-        assigned one. Settling against an invented expiry would score the trade
-        over a window the signal never specified.
+        If include_unexpired is False, returns only signals whose expiry has passed.
+        If include_unexpired is True, returns active unsettled signals as well.
         """
         settled = select(m.SettledSignalRow.signal_id)
         stmt = (
@@ -946,7 +943,9 @@ class SqlRepository:
             if not expiry:
                 continue
             parsed = expiry if isinstance(expiry, datetime) else _parse_utc(str(expiry))
-            if parsed is None or parsed > now:
+            if parsed is None:
+                continue
+            if not include_unexpired and parsed > now:
                 continue
             raw_price = payload.get("reference_price")
             price: Decimal | None = None
@@ -962,9 +961,14 @@ class SqlRepository:
                     direction=SignalDirection(row.direction),
                     reference_price=price,
                     expiry_utc=parsed,
+                    created_at_utc=row.signal_time_utc,
                 )
             )
         return due
+
+    def unsettled_expired_signals(self, *, limit: int = 100) -> list[AIDecision]:
+        """Signals whose expiry has passed and which have no settlement row yet."""
+        return self.unsettled_signals(include_unexpired=False, limit=limit)
 
     def settled_signals(
         self, *, symbol: str | None = None, horizon: str | None = None, limit: int = 100
