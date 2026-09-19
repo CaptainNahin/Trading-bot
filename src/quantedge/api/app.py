@@ -87,15 +87,50 @@ def create_app() -> FastAPI:
         }
         
         import datetime
-        expiry_date = datetime.datetime(2026, 8, 17, 23, 30, tzinfo=datetime.timezone.utc)
+        import json
+        
         current_time = datetime.datetime.now(datetime.timezone.utc)
         
+        # 1. Check if it's one of the 2-day temp accounts
+        expiry_date = datetime.datetime(2026, 8, 17, 23, 30, tzinfo=datetime.timezone.utc)
         is_valid_temp = False
         if current_time < expiry_date:
             if _username in temp_accounts and secrets.compare_digest(password, temp_accounts[_username]):
                 is_valid_temp = True
 
-        if not (is_admin or is_valid_temp):
+        # 2. Free 1-day trial by email auto-registration
+        is_valid_trial = False
+        if "@" in _username:
+            users_file = Path("data/users.json")
+            if not users_file.parent.exists():
+                users_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            users = {}
+            if users_file.exists():
+                try:
+                    with open(users_file, "r") as f:
+                        users = json.load(f)
+                except Exception:
+                    pass
+            
+            if _username not in users:
+                # Auto-register new trial user
+                users[_username] = {
+                    "password": password,
+                    "created_at": current_time.isoformat()
+                }
+                with open(users_file, "w") as f:
+                    json.dump(users, f)
+                is_valid_trial = True
+            else:
+                # Validate returning trial user
+                user_data = users[_username]
+                if secrets.compare_digest(password, user_data["password"]):
+                    created_at = datetime.datetime.fromisoformat(user_data["created_at"])
+                    if (current_time - created_at).total_seconds() < 86400: # 1 day = 86400 seconds
+                        is_valid_trial = True
+
+        if not (is_admin or is_valid_temp or is_valid_trial):
             return challenge
 
         return await call_next(request)
