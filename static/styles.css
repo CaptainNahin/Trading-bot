@@ -252,9 +252,11 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .chat-form input { min-width: 0; height: 40px; padding: 0 12px; border: 1px solid var(--line); background: #08080a; color: var(--white); font-size: 12px; }
 .icon-button-accent { width: 40px; height: 40px; border-color: var(--red); background: var(--red); }
 .icon-button-accent:hover { color: #fff; background: var(--red-bright); }
-.chat-quick { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
-.chat-quick button { padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; font: 9px var(--mono); }
-.chat-quick button:hover { color: var(--white); }
+.chat-quick { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 16px; padding-top: 14px; border-top: 1px solid rgba(255, 255, 255, 0.18); }
+.chat-quick-label { font: 700 11px var(--mono); color: var(--muted); letter-spacing: 0.08em; text-transform: uppercase; margin-right: 4px; }
+.chat-quick button { padding: 8px 16px; border: 1px solid rgba(255, 255, 255, 0.22); border-radius: 6px; background: rgba(255, 255, 255, 0.08); color: #ffffff; cursor: pointer; font: 600 13px/1.2 var(--mono); letter-spacing: 0.03em; transition: all 0.2s ease; display: inline-flex; align-items: center; gap: 6px; }
+.chat-quick button:hover { color: #ffffff; background: rgba(255, 51, 68, 0.22); border-color: var(--red); box-shadow: 0 0 14px rgba(255, 51, 68, 0.4); transform: translateY(-1px); }
+.chat-quick button:active { transform: translateY(0); }
 .decision-output .surface-kicker { margin-bottom: 30px; }
 .decision-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; }
 .decision-header h4 { margin: 8px 0 0; font-size: 30px; }
