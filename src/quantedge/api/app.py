@@ -101,7 +101,11 @@ def create_app() -> FastAPI:
         # 2. Free 1-day trial by email auto-registration
         is_valid_trial = False
         if "@" in _username:
-            users_file = Path("data/users.json")
+            import tempfile
+            if "VERCEL" in os.environ or "tmp" in os.getenv("SQLITE_PATH", "").lower():
+                users_file = Path(tempfile.gettempdir()) / "quantedge_users.json"
+            else:
+                users_file = Path("data/users.json")
             if not users_file.parent.exists():
                 users_file.parent.mkdir(parents=True, exist_ok=True)
             
