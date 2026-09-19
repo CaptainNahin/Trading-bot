@@ -4,7 +4,9 @@
 alembic==1.19.0
     # via quantedge-live-gateway
 annotated-doc==0.0.5
-    # via fastapi
+    # via
+    #   fastapi
+    #   typer
 annotated-types==0.8.0
     # via pydantic
 anthropic==0.121.0
@@ -13,7 +15,6 @@ anyio==4.14.2
     # via
     #   anthropic
     #   httpx
-    #   httpx2
     #   mcp
     #   sse-starlette
     #   starlette
@@ -28,12 +29,17 @@ certifi==2026.7.22
     # via
     #   httpcore
     #   httpx
+    #   requests
 cffi==2.1.1 ; platform_python_implementation != 'PyPy'
     # via cryptography
+charset-normalizer==3.5.1
+    # via requests
 click==8.4.2
     # via uvicorn
 colorama==0.4.6 ; sys_platform == 'win32'
-    # via click
+    # via
+    #   click
+    #   typer
 cryptography==50.0.0
     # via pyjwt
 distro==1.9.0
@@ -42,30 +48,33 @@ docstring-parser==0.18.0
     # via anthropic
 fastapi==0.141.1
     # via quantedge-live-gateway
+feedparser==6.0.14
+    # via tradingview-mcp-server
+feedparser-sgmllib==2.1.0
+    # via feedparser
 greenlet==3.5.4 ; platform_machine == 'AMD64' or platform_machine == 'WIN32' or platform_machine == 'aarch64' or platform_machine == 'amd64' or platform_machine == 'ppc64le' or platform_machine == 'win32' or platform_machine == 'x86_64'
     # via sqlalchemy
 h11==0.16.0
     # via
     #   httpcore
-    #   httpcore2
     #   uvicorn
 httpcore==1.0.9
     # via httpx
-httpcore2==2.9.1
-    # via httpx2
 httptools==0.8.0
     # via uvicorn
 httpx==0.28.1
     # via
     #   anthropic
+    #   mcp
     #   quantedge-live-gateway
-httpx2==2.9.1
+    #   tradingview-mcp-server
+httpx-sse==0.4.3
     # via mcp
 idna==3.18
     # via
     #   anyio
     #   httpx
-    #   httpx2
+    #   requests
 jiter==0.16.0
     # via anthropic
 jsonschema==4.26.0
@@ -74,12 +83,16 @@ jsonschema-specifications==2025.9.1
     # via jsonschema
 mako==1.4.1
     # via alembic
+markdown-it-py==4.2.0
+    # via rich
 markupsafe==3.0.3
     # via mako
-mcp==2.0.0
-    # via quantedge-live-gateway
-mcp-types==2.0.0
-    # via mcp
+mcp==1.30.0
+    # via
+    #   quantedge-live-gateway
+    #   tradingview-mcp-server
+mdurl==0.1.2
+    # via markdown-it-py
 numpy==2.4.6 ; python_full_version < '3.12'
     # via
     #   pandas
@@ -88,10 +101,10 @@ numpy==2.5.1 ; python_full_version >= '3.12'
     # via
     #   pandas
     #   quantedge-live-gateway
-opentelemetry-api==1.44.0
-    # via mcp
-pandas==3.0.5
-    # via quantedge-live-gateway
+pandas==2.3.3
+    # via
+    #   quantedge-live-gateway
+    #   tradingview-screener
 pg8000==1.31.5
     # via quantedge-live-gateway
 pycparser==3.0 ; implementation_name != 'PyPy' and platform_python_implementation != 'PyPy'
@@ -101,13 +114,16 @@ pydantic==2.13.4
     #   anthropic
     #   fastapi
     #   mcp
-    #   mcp-types
     #   pydantic-settings
     #   quantedge-live-gateway
 pydantic-core==2.46.4
     # via pydantic
 pydantic-settings==2.15.0
-    # via quantedge-live-gateway
+    # via
+    #   mcp
+    #   quantedge-live-gateway
+pygments==2.20.0
+    # via rich
 pyjwt==2.13.0
     # via mcp
 python-dateutil==2.9.0.post0
@@ -116,11 +132,14 @@ python-dateutil==2.9.0.post0
     #   pg8000
 python-dotenv==1.2.2
     # via
+    #   mcp
     #   pydantic-settings
     #   quantedge-live-gateway
     #   uvicorn
 python-multipart==0.0.32
     # via mcp
+pytz==2026.3.post1
+    # via pandas
 pywin32==312 ; sys_platform == 'win32'
     # via mcp
 pyyaml==6.0.3
@@ -131,12 +150,21 @@ referencing==0.37.0
     # via
     #   jsonschema
     #   jsonschema-specifications
+requests==2.34.2
+    # via
+    #   tradingview-mcp-server
+    #   tradingview-screener
+    #   tradingview-ta
+rich==15.0.0
+    # via typer
 rpds-py==2026.6.3
     # via
     #   jsonschema
     #   referencing
 scramp==1.4.17
     # via pg8000
+shellingham==1.5.4
+    # via typer
 six==1.17.0
     # via python-dateutil
 sniffio==1.3.1
@@ -154,20 +182,25 @@ starlette==1.4.1
     #   sse-starlette
 tenacity==9.1.4
     # via quantedge-live-gateway
-truststore==0.10.4
+tradingview-mcp-server==0.8.1
+    # via quantedge-live-gateway
+tradingview-screener==3.0.0
     # via
-    #   httpcore2
-    #   httpx2
+    #   quantedge-live-gateway
+    #   tradingview-mcp-server
+tradingview-ta==3.3.0
+    # via
+    #   quantedge-live-gateway
+    #   tradingview-mcp-server
+typer==0.27.2
+    # via mcp
 typing-extensions==4.16.0
     # via
     #   alembic
     #   anthropic
     #   anyio
     #   fastapi
-    #   httpx2
     #   mcp
-    #   mcp-types
-    #   opentelemetry-api
     #   pydantic
     #   pydantic-core
     #   referencing
@@ -180,8 +213,10 @@ typing-inspection==0.4.2
     #   mcp
     #   pydantic
     #   pydantic-settings
-tzdata==2026.3 ; sys_platform == 'emscripten' or sys_platform == 'win32'
+tzdata==2026.3
     # via pandas
+urllib3==2.8.0
+    # via requests
 uvicorn==0.52.1
     # via
     #   mcp
@@ -194,7 +229,3 @@ websockets==17.0.1
     # via
     #   quantedge-live-gateway
     #   uvicorn
-tradingview-ta>=3.3.0
-tradingview-screener>=3.0.0
-tradingview-mcp-server>=0.8.1
-feedparser>=6.0.14
