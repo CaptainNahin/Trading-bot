@@ -222,7 +222,60 @@
 
     <div class="login-layer" id="login-layer" hidden>
         <div class="login-backdrop" data-close-login></div>
-        <section class="login-panel" role="dialog" aria-modal="true" aria-labelledby="login-title"><button class="icon-button login-close" type="button" data-close-login aria-label="Close login"><i data-lucide="x"></i></button><span class="eyebrow"><span>ACCESS</span> WORKSPACE GATE</span><h2 id="login-title">Enter the command deck.</h2><p>Log in with your own email and password to start a free 1-day trial, or use an operator name.</p><form id="login-form"><label class="field"><span>EMAIL (OR OPERATOR NAME)</span><input id="login-username" value="" placeholder="you@example.com" autocomplete="username"></label><label class="field"><span>WORKSPACE PASSWORD</span><input id="login-password" type="password" autocomplete="current-password" required></label><button class="button button-primary login-submit" type="submit"><i data-lucide="unlock"></i><span>Unlock workspace</span></button><div class="login-error" id="login-error" role="alert"></div></form><div class="login-footnote"><span class="live-dot"></span> API ACCESS IS SCOPED TO THIS SESSION</div></section>
+        <section class="login-panel" role="dialog" aria-modal="true" aria-labelledby="login-title">
+            <button class="icon-button login-close" type="button" data-close-login aria-label="Close login"><i data-lucide="x"></i></button>
+            <span class="eyebrow"><span>ACCESS</span> WORKSPACE GATE</span>
+            <h2 id="login-title">Enter the command deck.</h2>
+            <p style="margin-bottom: 16px;">Access institutional analysis, live signals, and the ZXL AI Brain.</p>
+
+            <!-- 1-Day Free Trial Instant Access Card -->
+            <div class="trial-banner" style="margin-bottom: 18px; padding: 14px; background: rgba(224, 71, 36, 0.08); border: 1px solid rgba(224, 71, 36, 0.28); border-radius: 4px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+                    <span style="font: 11px var(--mono); color: var(--red-bright); font-weight: 600; letter-spacing: 0.5px;">⚡ NEW USER ACCESS</span>
+                    <span style="font: 9px var(--mono); color: var(--muted); background: rgba(255,255,255,0.06); padding: 2px 6px; border-radius: 2px;">24-HOUR PASS</span>
+                </div>
+                <p style="margin: 0 0 10px; font-size: 12px; color: #d0ceca; line-height: 1.45;">
+                    Get full, unrestricted access to the trading bot, live signals, and the AI Brain for 1 day without entering a password.
+                </p>
+                <button class="button button-primary" id="btn-start-trial" type="button" style="width: 100%; justify-content: center; gap: 8px;">
+                    <i data-lucide="zap"></i>
+                    <span>Start 1-Day Free Trial (Instant Access)</span>
+                </button>
+            </div>
+
+            <div style="display: flex; align-items: center; gap: 10px; margin: 14px 0; color: var(--dim); font: 9px var(--mono);">
+                <span style="flex: 1; height: 1px; background: var(--line);"></span>
+                <span>OR LOG IN WITH CREDENTIALS</span>
+                <span style="flex: 1; height: 1px; background: var(--line);"></span>
+            </div>
+
+            <form id="login-form">
+                <label class="field">
+                    <span>EMAIL (OR OPERATOR NAME)</span>
+                    <input id="login-username" value="" placeholder="you@example.com or operator" autocomplete="username">
+                </label>
+                <label class="field">
+                    <span>WORKSPACE PASSWORD</span>
+                    <input id="login-password" type="password" placeholder="Master or trial password" autocomplete="current-password" required>
+                </label>
+                <button class="button button-primary login-submit" type="submit">
+                    <i data-lucide="unlock"></i>
+                    <span>Unlock workspace</span>
+                </button>
+                <div class="login-error" id="login-error" role="alert"></div>
+            </form>
+
+            <div class="login-guide" style="margin-top: 18px; padding: 12px; background: rgba(255,255,255,0.02); border: 1px solid var(--line); border-radius: 4px; font-size: 11px; color: var(--muted); line-height: 1.5;">
+                <div style="font: 10px var(--mono); color: #fff; margin-bottom: 6px; font-weight: 600;">LOGIN INFORMATION & ACCESS OPTIONS:</div>
+                <div style="margin-bottom: 4px;">• <strong>1-Day Free Pass:</strong> Click the "Start 1-Day Free Trial" button above for instant 24h access.</div>
+                <div style="margin-bottom: 4px;">• <strong>Email Trial:</strong> Enter your email + any chosen password to auto-register a 1-day pass.</div>
+                <div>• <strong>Master Access:</strong> Enter the workspace administrator password (<code>Bot@2026</code>).</div>
+            </div>
+
+            <div class="login-footnote">
+                <span class="live-dot"></span> API ACCESS IS SCOPED TO THIS SESSION
+            </div>
+        </section>
     </div>
 
     <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>

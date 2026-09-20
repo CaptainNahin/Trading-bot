@@ -1,6 +1,6 @@
 """MCP Server implementation using MCPServer stdio transport.
 
-Exposes 20 deterministic market analysis and signal tools over MCP stdio protocol.
+Exposes 24 deterministic market analysis and signal tools over MCP stdio protocol.
 
 Every tool returns JSON built by the same service layer the REST API uses, so a
 model reading this surface sees the numbers the pipeline computed rather than

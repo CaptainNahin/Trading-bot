@@ -29,6 +29,7 @@ function bindPublicShell() {
         document.getElementById(button.dataset.scrollTarget)?.scrollIntoView({ behavior: 'smooth' });
     }));
     document.getElementById('login-form')?.addEventListener('submit', handleLogin);
+    document.getElementById('btn-start-trial')?.addEventListener('click', handleStartTrial);
     document.querySelector('[data-show-landing]')?.addEventListener('click', () => {
         document.getElementById('workspace').hidden = true;
         document.querySelectorAll('[data-public-ui]').forEach((element) => { element.hidden = false; });
@@ -306,10 +307,46 @@ async function handleLogin(event) {
     }
 }
 
+async function handleStartTrial() {
+    const error = document.getElementById('login-error');
+    const trialBtn = document.getElementById('btn-start-trial');
+    if (error) error.textContent = '';
+    if (trialBtn) {
+        trialBtn.disabled = true;
+        trialBtn.innerHTML = '<span>Activating 1-Day Pass...</span>';
+    }
+    try {
+        const res = await fetch('/api/v1/auth/trial-pass', { method: 'POST' });
+        if (!res.ok) throw new Error('Could not generate trial pass.');
+        const data = await res.json();
+        const username = data.username || 'guest';
+        const password = data.token;
+        const nextCredentials = `Basic ${btoa(`${username}:${password}`)}`;
+        // Test credentials against API
+        const testRes = await fetch('/api/v1/bot/time-limits', { headers: { Authorization: nextCredentials } });
+        if (!testRes.ok) throw new Error('Trial token rejected by server.');
+        credentials = nextCredentials;
+        sessionStorage.setItem('qe_basic_auth', credentials);
+        sessionStorage.setItem('qe_is_trial', 'true');
+        document.getElementById('login-layer').hidden = true;
+        enterWorkspace();
+    } catch (err) {
+        if (error) error.textContent = err.message || 'Trial activation failed. Please try again.';
+    } finally {
+        if (trialBtn) {
+            trialBtn.disabled = false;
+            trialBtn.innerHTML = '<i data-lucide="zap"></i><span>Start 1-Day Free Trial (Instant Access)</span>';
+            if (window.lucide) window.lucide.createIcons();
+        }
+    }
+}
+
 function enterWorkspace() {
     document.querySelectorAll('[data-public-ui]').forEach((element) => { element.hidden = true; });
     document.getElementById('workspace').hidden = false;
-    document.getElementById('session-label').textContent = SESSION_ID.slice(-8).toUpperCase();
+    const isTrial = sessionStorage.getItem('qe_is_trial') === 'true';
+    const tag = isTrial ? ' (1-DAY TRIAL)' : '';
+    document.getElementById('session-label').textContent = `${SESSION_ID.slice(-8).toUpperCase()}${tag}`;
     loadTimeLimits();
     fetchMemoryStats();
     fetchMemories();

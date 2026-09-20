@@ -302,6 +302,37 @@ class SeekAILLMProvider(BaseLLMProvider):
                 "dont_rules": [],
             }
 
+    def generate_chat_reply(
+        self,
+        message: str,
+        conversation_history: list[dict[str, str]] | None = None,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Generate a natural conversational response using the AI Brain."""
+        if not self._api_key:
+            raise ProviderUnavailableError(
+                self.provider_name, "SEEKAI_API_KEY is not configured"
+            )
+
+        messages: list[dict[str, str]] = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
+        if conversation_history:
+            for item in conversation_history[-6:]:
+                role = item.get("role", "user")
+                content = item.get("content", "")
+                if content:
+                    messages.append({"role": role, "content": content})
+
+        messages.append({"role": "user", "content": message})
+
+        return self._call_model(
+            messages=messages,
+            max_tokens=_MAX_TOKENS,
+            temperature=0.6,
+        )
+
     def _call_model(
         self,
         messages: list[dict[str, str]],
@@ -373,20 +404,32 @@ class SeekAILLMProvider(BaseLLMProvider):
                     f"Seek AI rejected credential or quota exhausted (HTTP 403): {err_text[:150]}",
                 )
 
-            # Check if rate limited (HTTP 429) and retry after brief backoff
-            if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
-                retry_after_hdr = response.headers.get("retry-after")
-                wait_time = float(retry_after_hdr) if retry_after_hdr else 3.0
-                log.warning(
-                    "seekai rate limited (HTTP 429); backing off before retry",
-                    extra={"wait_seconds": wait_time},
-                )
-                time.sleep(wait_time)
-                try:
-                    with httpx.Client(timeout=self._timeout) as retry_client:
-                        response = retry_client.post(endpoint, headers=self._headers(), json=body)
-                except Exception as retry_exc:
-                    log.warning("retry after rate limit failed", extra={"error": str(retry_exc)})
+            # Check if rate limited (HTTP 429) or transient gateway error (502, 503, 504)
+            if response.status_code in (
+                httpx.codes.TOO_MANY_REQUESTS,
+                httpx.codes.BAD_GATEWAY,
+                httpx.codes.SERVICE_UNAVAILABLE,
+                httpx.codes.GATEWAY_TIMEOUT,
+            ):
+                for retry_attempt in range(1, 3):
+                    wait_time = 2.0 * retry_attempt
+                    if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
+                        retry_after_hdr = response.headers.get("retry-after")
+                        if retry_after_hdr:
+                            wait_time = float(retry_after_hdr)
+                    log.warning(
+                        f"seekai HTTP {response.status_code}; backing off {wait_time:.1f}s before retry (attempt {retry_attempt}/2)",
+                        extra={"status": response.status_code, "attempt": retry_attempt},
+                    )
+                    time.sleep(wait_time)
+                    try:
+                        with httpx.Client(timeout=self._timeout) as retry_client:
+                            retry_resp = retry_client.post(endpoint, headers=self._headers(), json=body)
+                        response = retry_resp
+                        if response.status_code == httpx.codes.OK:
+                            break
+                    except Exception as retry_exc:
+                        log.warning("seekai retry failed", extra={"error": str(retry_exc)})
 
             self._raise_for_status(response)
 

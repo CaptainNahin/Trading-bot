@@ -26,3 +26,13 @@ class BaseLLMProvider(ABC):
     def evaluate_signal_context(self, context: SignalContext) -> LLMSignalResponse:
         """Evaluate a SignalContext and produce a structured LLMSignalResponse."""
         ...
+
+    def generate_chat_reply(
+        self,
+        message: str,
+        conversation_history: list[dict[str, str]] | None = None,
+        system_prompt: str | None = None,
+    ) -> str:
+        """Generate a natural conversational response."""
+        raise NotImplementedError(f"{self.provider_name} does not implement generate_chat_reply")
+

@@ -74,6 +74,7 @@ class Intent(str, Enum):
     TRADINGVIEW = "TRADINGVIEW"
     LIFECYCLE = "LIFECYCLE"
     HELP = "HELP"
+    CONVERSATION = "CONVERSATION"
     UNKNOWN = "UNKNOWN"
 
 
@@ -334,7 +335,9 @@ def handle_message(
         return _handle_time_limits()
     if parsed.intent is Intent.STATUS:
         return _handle_status()
-    return _handle_help(parsed.intent)
+    if parsed.intent is Intent.HELP:
+        return _handle_help(parsed.intent)
+    return _handle_conversation(message, state)
 
 
 def _handle_signal(
@@ -1311,3 +1314,73 @@ def _handle_help(intent: Intent) -> ChatReply:
     if intent is Intent.UNKNOWN:
         text = "I'm not sure what you're asking for.\n\n" + text
     return ChatReply(text=text, intent=intent, data={"help": True})
+
+
+_CONVERSATION_SYSTEM_PROMPT = """You are QuantEdge AI, an institutional quantitative trading intelligence assistant.
+You possess a dual-brain architecture:
+1. Deterministic Mathematical Quant Engine: Analyzes market structure (CHoCH, BOS, swing highs/lows), 200 EMA trend, ATR volatility bands, multi-timeframe consensus (1W, 1D, 4H, 1H, 15m), order book depth, and market regimes.
+2. ZXL AI Brain (powered by GLM 5.3 / DeepSeek via Seek AI): Synthesizes market dynamics, reviews quantitative trade candidates, vetoes low-quality setups, and performs deep post-mortem diagnostics on losing trades to extract DO/DON'T rules.
+
+You also integrate with:
+- TradingView Institutional Intelligence: Live technical analysis, institutional pivot levels (Pivot, S1-S3, R1-R3), Bollinger squeeze detection, and exchange-wide volume breakout screening across Crypto (Binance), Forex & Commodities (OANDA), and Equities (NASDAQ).
+- Autonomous Closed-Loop Memory Engine: Tracks active trades in real time until Take Profit or Stop Loss resolution, diagnosing losses to store high-leverage rules into memory.
+
+Guidelines for conversation:
+- For friendly greetings ("hi", "hello", "hey", "good morning"), respond warmly and professionally, introduce yourself as QuantEdge AI, and invite the user to analyze an asset or ask questions.
+- If asked questions about the platform, bot, trading concepts, market indicators (RSI, EMA, Bollinger, ATR, MTF), or trading strategies, provide clear, articulate, quantitative, and educational explanations.
+- Mention quick actionable commands when relevant: e.g. `BTC 15m` for signals, `tv btc` for TradingView TA & pivots, `tv breakouts` for volume gainers, `active trades` for in-flight tracking, or `status` for system health.
+- Keep answers concise, insightful, well-formatted in markdown, and free of financial advice disclaimers that overwhelm the response. Remind users when relevant that QuantEdge is an analysis gateway, not an order execution broker.
+"""
+
+
+def _handle_conversation(message: str, state: dict[str, Any]) -> ChatReply:
+    """Handle freeform conversational messages and user questions using the AI Brain."""
+    text = message.strip()
+    history = state.get("conversation_history", [])
+
+    try:
+        from quantedge.providers.llm import default_llm_provider
+
+        provider = default_llm_provider()
+        if provider is not None and hasattr(provider, "generate_chat_reply"):
+            reply_text = provider.generate_chat_reply(
+                message=text,
+                conversation_history=history,
+                system_prompt=_CONVERSATION_SYSTEM_PROMPT,
+            )
+            # Update conversational history (keep last 8 turns)
+            history.append({"role": "user", "content": text})
+            history.append({"role": "assistant", "content": reply_text})
+            state["conversation_history"] = history[-8:]
+
+            return ChatReply(
+                text=reply_text,
+                intent=Intent.CONVERSATION,
+                data={"conversation": True, "provider": getattr(provider, "provider_name", "ai")},
+            )
+    except Exception as exc:
+        log.warning(
+            "conversational AI reply unavailable; falling back to grounded response",
+            extra={"error": str(exc)},
+        )
+
+    # Grounded fallback if AI endpoint is experiencing transient network/quota delay
+    fallback_text = (
+        "Hello! I'm **QuantEdge AI**, your dual-brain quantitative trading intelligence assistant.\n\n"
+        "I combine deterministic market analytics with an AI reasoning layer to deliver institutional-grade market structure, "
+        "TradingView technical indicators, and autonomous outcome learning.\n\n"
+        "**Here is how you can interact with me:**\n"
+        "- `BTC 15m` -- Generate a high-conviction trade signal with entry, stop loss, and take profit levels\n"
+        "- `tv btc` -- Live TradingView technical analysis, Bollinger squeeze status & institutional pivots\n"
+        "- `tv breakouts` -- Scan top momentum volume breakouts on Binance\n"
+        "- `active trades` -- Monitor in-flight positions and automated trade settlements\n"
+        "- `what have you learned` -- Review rules extracted by the Autonomous Memory Bank\n"
+        "- `status` -- Check connected market sources and AI brain health\n\n"
+        "How can I help your market analysis today?"
+    )
+    return ChatReply(
+        text=fallback_text,
+        intent=Intent.CONVERSATION,
+        data={"conversation": True, "fallback": True},
+    )
+
