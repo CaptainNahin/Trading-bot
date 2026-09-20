@@ -49,7 +49,7 @@ log = get_logger(__name__)
 _DEFAULT_BASE_URL = "https://seekai.cc/v1"
 _DEFAULT_MODEL = "glm-5.3"
 _DEFAULT_FALLBACK_MODEL = "deepseek-v4-flash"
-_TIMEOUT_SECONDS = 60.0
+_TIMEOUT_SECONDS = 25.0
 _TEMPERATURE = 0.2
 _MAX_TOKENS = 4096
 _HEALTH_MAX_TOKENS = 64
@@ -426,7 +426,12 @@ class SeekAILLMProvider(BaseLLMProvider):
                         with httpx.Client(timeout=self._timeout) as retry_client:
                             retry_resp = retry_client.post(endpoint, headers=self._headers(), json=body)
                         response = retry_resp
-                        if response.status_code == httpx.codes.OK:
+                        if response.status_code == httpx.codes.OK or response.status_code not in (
+                            httpx.codes.TOO_MANY_REQUESTS,
+                            httpx.codes.BAD_GATEWAY,
+                            httpx.codes.SERVICE_UNAVAILABLE,
+                            httpx.codes.GATEWAY_TIMEOUT,
+                        ):
                             break
                     except Exception as retry_exc:
                         log.warning("seekai retry failed", extra={"error": str(retry_exc)})
