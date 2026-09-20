@@ -121,7 +121,17 @@ def create_app() -> FastAPI:
         ):
             return await call_next(request)
 
+        # Support Bearer trial token or X-Trial-Token directly
+        bearer_token = None
         auth = request.headers.get("Authorization")
+        if auth and auth.startswith("Bearer "):
+            bearer_token = auth[7:].strip()
+        elif request.headers.get("X-Trial-Token"):
+            bearer_token = request.headers.get("X-Trial-Token").strip()
+
+        if bearer_token and verify_trial_token(bearer_token):
+            return await call_next(request)
+
         if not auth or not auth.startswith("Basic "):
             return challenge
 

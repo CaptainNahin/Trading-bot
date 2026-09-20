@@ -39,12 +39,18 @@ def main():
         fail_check("Trial token structure", str(token))
     pass_check("Public /api/v1/auth/trial-pass issued 24h token", token)
 
-    # 2. Test accessing protected endpoint with 1-day trial token
+    # 2. Test accessing protected endpoint with 1-day trial token (Basic auth)
     auth_hdr = f"Basic {base64.b64encode(f'guest:{token}'.encode()).decode()}"
     res_protected = client.get("/api/v1/bot/time-limits", headers={"Authorization": auth_hdr})
     if res_protected.status_code != 200:
         fail_check("Access with trial token", f"Status {res_protected.status_code}: {res_protected.text}")
-    pass_check("1-Day trial token successfully unlocked protected API", "Status 200 OK")
+    pass_check("1-Day trial token successfully unlocked protected API (Basic)", "Status 200 OK")
+
+    # 2b. Test accessing protected endpoint with Bearer trial token
+    res_bearer = client.get("/api/v1/bot/time-limits", headers={"Authorization": f"Bearer {token}"})
+    if res_bearer.status_code != 200:
+        fail_check("Access with Bearer trial token", f"Status {res_bearer.status_code}: {res_bearer.text}")
+    pass_check("1-Day trial token successfully unlocked protected API (Bearer)", "Status 200 OK")
 
     # 3. Test Master Password access
     master_auth = f"Basic {base64.b64encode(b'operator:Bot@2026').decode()}"
