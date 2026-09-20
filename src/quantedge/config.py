@@ -112,8 +112,8 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-3.1-pro-preview"
     seekai_api_key: SecretStr | None = None
     seekai_base_url: str = "https://seekai.cc/v1"
-    seekai_model: str = "glm-5.3"
-    seekai_fallback_model: str = "deepseek-v4-flash"
+    seekai_model: str = "deepseek-v4-flash"
+    seekai_fallback_model: str = "glm-5.3"
     # How long to wait for a review before abandoning it and shipping the
     # deterministic candidate unreviewed. The default suits a long-lived
     # process. A serverless host kills the whole request at its own ceiling,

@@ -47,8 +47,8 @@ __all__ = ["SeekAILLMProvider"]
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://seekai.cc/v1"
-_DEFAULT_MODEL = "glm-5.3"
-_DEFAULT_FALLBACK_MODEL = "deepseek-v4-flash"
+_DEFAULT_MODEL = "deepseek-v4-flash"
+_DEFAULT_FALLBACK_MODEL = "glm-5.3"
 _TIMEOUT_SECONDS = 25.0
 _TEMPERATURE = 0.2
 _MAX_TOKENS = 4096
@@ -343,33 +343,32 @@ class SeekAILLMProvider(BaseLLMProvider):
         """Call Seek AI chat completion endpoint with automatic fallback on quota exhaustion."""
         endpoint = f"{self._base_url}/chat/completions"
         active_candidate = SeekAILLMProvider._ACTIVE_MODEL or self.model_name
-        models_to_try = [active_candidate]
-        if active_candidate != self._fallback_model:
-            models_to_try.append(self._fallback_model)
+        models_to_try: list[str] = [active_candidate]
+        for cand in ("deepseek-v4-flash", self._fallback_model, "DeepSeek-V4.1-Flash", "glm-5.3"):
+            if cand and cand not in models_to_try:
+                models_to_try.append(cand)
 
         last_exc: Exception | None = None
         for idx, model_name in enumerate(models_to_try):
+            has_next = idx < len(models_to_try) - 1
             body = {
                 "model": model_name,
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             }
-            call_timeout = 20.0 if (idx == 0 and len(models_to_try) > 1) else self._timeout
+            call_timeout = 15.0 if has_next else self._timeout
             try:
                 with httpx.Client(timeout=call_timeout) as client:
                     response = client.post(endpoint, headers=self._headers(), json=body)
             except (httpx.TimeoutException, httpx.HTTPError) as exc:
-                if idx == 0 and len(models_to_try) > 1:
+                if has_next:
+                    next_cand = models_to_try[idx + 1]
                     log.warning(
-                        "seekai primary model network error or timeout; switching to fallback model",
-                        extra={
-                            "primary": self.model_name,
-                            "fallback": self._fallback_model,
-                            "error": str(exc),
-                        },
+                        f"seekai model '{model_name}' network error ({type(exc).__name__}); failover to '{next_cand}'",
+                        extra={"error": str(exc)},
                     )
-                    SeekAILLMProvider._ACTIVE_MODEL = self._fallback_model
+                    SeekAILLMProvider._ACTIVE_MODEL = next_cand
                     continue
                 if isinstance(exc, httpx.TimeoutException):
                     raise ProviderTimeoutError(self.provider_name, self._timeout) from exc
@@ -378,23 +377,24 @@ class SeekAILLMProvider(BaseLLMProvider):
                     f"{self._base_url} unreachable: {type(exc).__name__}",
                 ) from exc
 
-            # Check if primary model is forbidden, quota-exhausted, svip-restricted, or gateway timed out
-            if idx == 0 and len(models_to_try) > 1 and response.status_code in (
+            # If model is unauthorized (token lacks model access), forbidden (SVIP), not found, bad request, or gateway error, failover!
+            if has_next and response.status_code in (
+                httpx.codes.UNAUTHORIZED,
                 httpx.codes.FORBIDDEN,
+                httpx.codes.NOT_FOUND,
+                httpx.codes.BAD_REQUEST,
                 httpx.codes.GATEWAY_TIMEOUT,
                 httpx.codes.BAD_GATEWAY,
                 httpx.codes.SERVICE_UNAVAILABLE,
+                httpx.codes.INTERNAL_SERVER_ERROR,
             ):
-                err_text = response.text
+                next_cand = models_to_try[idx + 1]
+                err_text = response.text[:120]
                 log.warning(
-                    f"seekai primary model unavailable (HTTP {response.status_code}); switching to fallback model",
-                    extra={
-                        "primary": self.model_name,
-                        "fallback": self._fallback_model,
-                        "raw_error": err_text[:120],
-                    },
+                    f"seekai model '{model_name}' unavailable (HTTP {response.status_code}); failover to '{next_cand}'",
+                    extra={"raw_error": err_text},
                 )
-                SeekAILLMProvider._ACTIVE_MODEL = self._fallback_model
+                SeekAILLMProvider._ACTIVE_MODEL = next_cand
                 continue
 
             if response.status_code == httpx.codes.FORBIDDEN:
@@ -436,7 +436,17 @@ class SeekAILLMProvider(BaseLLMProvider):
                     except Exception as retry_exc:
                         log.warning("seekai retry failed", extra={"error": str(retry_exc)})
 
+            if response.status_code != httpx.codes.OK and has_next:
+                next_cand = models_to_try[idx + 1]
+                log.warning(
+                    f"seekai model '{model_name}' non-OK response (HTTP {response.status_code}); failover to '{next_cand}'",
+                    extra={"raw_error": response.text[:120]},
+                )
+                SeekAILLMProvider._ACTIVE_MODEL = next_cand
+                continue
+
             self._raise_for_status(response)
+            SeekAILLMProvider._ACTIVE_MODEL = model_name
 
             try:
                 data = response.json()

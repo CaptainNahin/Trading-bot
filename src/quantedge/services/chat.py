@@ -1333,10 +1333,122 @@ Guidelines for conversation:
 """
 
 
+def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
+    """Generate an intelligent, question-specific response when upstream LLM is experiencing transient delays."""
+    lower = user_text.lower().strip()
+
+    # 1. "what are you doing" / current activity
+    if any(phrase in lower for phrase in ("what are you doing", "what are u doing", "what are you up to", "what's happening", "what are you working on")):
+        return (
+            "Right now, I am actively monitoring live market feeds across Binance (Crypto), Twelve Data (Forex), "
+            "and Alpha Vantage. My quantitative engine is scanning multi-timeframe order flow and market structure, "
+            "while my autonomous lifecycle monitor tracks open trades until Take Profit or Stop Loss.\n\n"
+            "Would you like me to run an institutional scan on a specific asset? For example, type `BTC 15m` "
+            "or `tv btc` for live TradingView indicators!"
+        )
+
+    # 2. Questions about the bot / platform / how it works
+    if any(phrase in lower for phrase in ("how does", "how do you", "what is this bot", "tell me about", "who are you", "what can you do", "features", "how it works", "bot work")):
+        return (
+            "I am **QuantEdge AI**, an institutional-grade quantitative trading platform featuring a **Dual-Brain Architecture**:\n\n"
+            "1. **Mathematical Quant Engine**: Analyzes 200 EMA trend alignment, ATR volatility bands, multi-timeframe consensus (15m, 1H, 4H, 1D), and order book volume delta.\n"
+            "2. **ZXL AI Brain**: Reviews quantitative setups, filters out low-conviction market noise, and conducts post-mortem diagnostics on resolved trades.\n"
+            "3. **TradingView Institutional Tools**: FastMCP integration providing live technical summaries, floor pivots (S1-S3, R1-R3), and volume breakout screeners.\n"
+            "4. **Autonomous Memory Engine**: Automatically settles active trades and learns DO/DON'T rules from losses to improve over time.\n\n"
+            "Try commanding me with `BTC 15m`, `tv btc`, `tv breakouts`, or `active trades`!"
+        )
+
+    # 3. Questions about markets / supported assets
+    if any(phrase in lower for phrase in ("markets", "assets", "symbols", "what coins", "what crypto", "supported")):
+        return (
+            "I support three institutional asset classes:\n\n"
+            "- **Crypto**: Bitcoin (`BTCUSDT`), Ethereum (`ETHUSDT`), Solana (`SOLUSDT`), Binance Coin (`BNBUSDT`), Ripple (`XRPUSDT`).\n"
+            "- **Forex**: Euro (`EURUSD`), British Pound (`GBPUSD`), Japanese Yen (`USDJPY`).\n"
+            "- **Commodities**: Gold (`XAUUSD`), Silver (`XAGUSD`), Crude Oil (`WTICOUSD`).\n\n"
+            "You can analyze any of these on holding horizons from 1m up to 1 hour (e.g. `ETH 1h` or `tv gold`)."
+        )
+
+    # 4. Questions about active trades / positions
+    if any(phrase in lower for phrase in ("active", "positions", "open trades", "in flight")):
+        try:
+            from quantedge.services.lifecycle import get_active_signals_summary
+            summary = get_active_signals_summary()
+            count = summary.get("total_active", 0)
+            if count == 0:
+                return "There are currently no active in-flight trades open. You can generate a new high-conviction setup by typing e.g. `BTC 15m`!"
+            signals = summary.get("signals", [])
+            lines = [f"- **{s['symbol']}** ({s.get('direction', 'TRADE')}) at {s['reference_price']} (expires in {s['remaining_minutes']}m)" for s in signals[:5]]
+            return f"Currently monitoring **{count} active in-flight trade(s)**:\n" + "\n".join(lines)
+        except Exception:
+            return "You can check all in-flight positions and automated settlements anytime by typing `active trades`."
+
+    # 5. Questions about performance, win rate, or memory
+    if any(phrase in lower for phrase in ("win rate", "performance", "memory", "learned", "accuracy", "track record")):
+        try:
+            from quantedge.services.memory import get_memory_bank_summary
+            mem = get_memory_bank_summary()
+            total = mem.get("total_memories", 0)
+            wins = mem.get("wins", 0)
+            losses = mem.get("losses", 0)
+            rules = mem.get("recent_rules", [])
+            rules_str = "\n".join(f"- {r}" for r in rules[:3]) if rules else "No recurring failure rules yet."
+            return (
+                f"**Autonomous Memory Bank Status**:\n"
+                f"- Total Recorded Trades: {total}\n"
+                f"- Wins: {wins} | Losses: {losses}\n\n"
+                f"**Active Learned Rules**:\n{rules_str}\n\n"
+                f"Type `what have you learned` to inspect the full trade journal."
+            )
+        except Exception:
+            return "Type `what have you learned` to inspect the complete memory journal and learned rules."
+
+    # 6. Friendly greetings (word boundary matched so 'this' doesn't match 'hi')
+    if re.search(r"\b(hi|hello|hey|good\s+morning|good\s+evening|good\s+day|sup|yo|howdy)\b", lower):
+        return (
+            "Hello! I'm **QuantEdge AI**, your dual-brain quantitative trading intelligence assistant.\n\n"
+            "I'm ready to analyze markets, scan technical indicators, or discuss trading strategies. "
+            "How can I help your market analysis today? You can command me with `BTC 15m`, `tv btc`, "
+            "or ask me any questions about our platform and strategies!"
+        )
+
+    # 7. Technical indicators & Quant concepts
+    if any(phrase in lower for phrase in ("atr", "ema", "rsi", "macd", "bollinger", "pivot", "indicator", "strategy", "risk", "stop loss", "take profit")):
+        return (
+            f"Here is how **QuantEdge AI** approaches quantitative indicators:\n\n"
+            "- **200 EMA**: Our baseline multi-timeframe trend regime filter. Longs are only validated when momentum is established above the EMA.\n"
+            "- **ATR (Average True Range)**: Used to mathematically calculate non-arbitrary Stop-Loss and Take-Profit distances, ensuring stops sit outside market noise.\n"
+            "- **TradingView Multi-Oscillator Consensus**: Evaluates RSI, MACD, Stochastics, and ADX together to avoid overbought/oversold false positives.\n"
+            "- **Institutional Pivots**: Computes Floor Pivot, S1-S3 support, and R1-R3 resistance levels for precision entry targets.\n\n"
+            "You can test live TradingView indicators on any asset right now by typing e.g. `tv btc` or `tv eth`!"
+        )
+
+    # 8. General fallback directly addressing the inquiry
+    return (
+        f"I received your question: *\"{user_text}\"*\n\n"
+        "As **QuantEdge AI**, I'm equipped to analyze market structure (200 EMA, ATR dynamic stops/targets, "
+        "order book volume delta), deliver TradingView institutional indicators, and track trade outcomes.\n\n"
+        "**Quick Actions:**\n"
+        "- Type `BTC 15m` to generate an algorithmic signal\n"
+        "- Type `tv btc` for TradingView multi-oscillator technical analysis & pivots\n"
+        "- Type `active trades` to monitor current positions\n"
+        "- Ask me any question about trading concepts (like RSI, ATR, or multi-timeframe alignment)!"
+    )
+
+
 def _handle_conversation(message: str, state: dict[str, Any]) -> ChatReply:
     """Handle freeform conversational messages and user questions using the AI Brain."""
     text = message.strip()
     history = state.get("conversation_history", [])
+
+    # Fetch live ground-truth platform context to ground the AI's answers
+    try:
+        from quantedge.services.platform_context import build_platform_context
+        platform_context = build_platform_context()
+    except Exception as ctx_err:
+        log.debug("could not build dynamic platform context", extra={"error": str(ctx_err)})
+        platform_context = ""
+
+    full_system_prompt = f"{_CONVERSATION_SYSTEM_PROMPT}\n\n{platform_context}" if platform_context else _CONVERSATION_SYSTEM_PROMPT
 
     try:
         from quantedge.providers.llm import default_llm_provider
@@ -1346,38 +1458,27 @@ def _handle_conversation(message: str, state: dict[str, Any]) -> ChatReply:
             reply_text = provider.generate_chat_reply(
                 message=text,
                 conversation_history=history,
-                system_prompt=_CONVERSATION_SYSTEM_PROMPT,
+                system_prompt=full_system_prompt,
             )
-            # Update conversational history (keep last 8 turns)
-            history.append({"role": "user", "content": text})
-            history.append({"role": "assistant", "content": reply_text})
-            state["conversation_history"] = history[-8:]
+            if reply_text and reply_text.strip():
+                # Update conversational history (keep last 8 turns)
+                history.append({"role": "user", "content": text})
+                history.append({"role": "assistant", "content": reply_text})
+                state["conversation_history"] = history[-8:]
 
-            return ChatReply(
-                text=reply_text,
-                intent=Intent.CONVERSATION,
-                data={"conversation": True, "provider": getattr(provider, "provider_name", "ai")},
-            )
+                return ChatReply(
+                    text=reply_text,
+                    intent=Intent.CONVERSATION,
+                    data={"conversation": True, "provider": getattr(provider, "provider_name", "ai")},
+                )
     except Exception as exc:
         log.warning(
             "conversational AI reply unavailable; falling back to grounded response",
             extra={"error": str(exc)},
         )
 
-    # Grounded fallback if AI endpoint is experiencing transient network/quota delay
-    fallback_text = (
-        "Hello! I'm **QuantEdge AI**, your dual-brain quantitative trading intelligence assistant.\n\n"
-        "I combine deterministic market analytics with an AI reasoning layer to deliver institutional-grade market structure, "
-        "TradingView technical indicators, and autonomous outcome learning.\n\n"
-        "**Here is how you can interact with me:**\n"
-        "- `BTC 15m` -- Generate a high-conviction trade signal with entry, stop loss, and take profit levels\n"
-        "- `tv btc` -- Live TradingView technical analysis, Bollinger squeeze status & institutional pivots\n"
-        "- `tv breakouts` -- Scan top momentum volume breakouts on Binance\n"
-        "- `active trades` -- Monitor in-flight positions and automated trade settlements\n"
-        "- `what have you learned` -- Review rules extracted by the Autonomous Memory Bank\n"
-        "- `status` -- Check connected market sources and AI brain health\n\n"
-        "How can I help your market analysis today?"
-    )
+    # Grounded question-specific fallback if AI endpoint is experiencing transient network/quota delay
+    fallback_text = _generate_contextual_fallback(text, platform_context)
     return ChatReply(
         text=fallback_text,
         intent=Intent.CONVERSATION,
