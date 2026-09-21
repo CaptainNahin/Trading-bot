@@ -52,14 +52,33 @@ def main():
         fail_check("Access with Bearer trial token", f"Status {res_bearer.status_code}: {res_bearer.text}")
     pass_check("1-Day trial token successfully unlocked protected API (Bearer)", "Status 200 OK")
 
-    # 3. Test Master Password access
+    # 3. Test Master Password access (Bot@2026 and Bot2026 with any username)
     master_auth = f"Basic {base64.b64encode(b'operator:Bot@2026').decode()}"
     res_master = client.get("/api/v1/bot/time-limits", headers={"Authorization": master_auth})
     if res_master.status_code != 200:
-        fail_check("Master password access", str(res_master.status_code))
+        fail_check("Master password access (Bot@2026)", str(res_master.status_code))
     pass_check("Master password (Bot@2026) verified", "Status 200 OK")
 
-    # 4. Test pre-configured temporary trader account
+    master_auth2 = f"Basic {base64.b64encode(b'custom_username:Bot2026').decode()}"
+    res_master2 = client.get("/api/v1/bot/time-limits", headers={"Authorization": master_auth2})
+    if res_master2.status_code != 200:
+        fail_check("Master password access (Bot2026 + custom username)", str(res_master2.status_code))
+    pass_check("Master password (Bot2026 with any username) verified", "Status 200 OK")
+
+    # 4. Test dedicated secondary trader account (trader:Trader2026 and any username:Trader2026)
+    secondary_auth = f"Basic {base64.b64encode(b'trader:Trader2026').decode()}"
+    res_sec = client.get("/api/v1/bot/time-limits", headers={"Authorization": secondary_auth})
+    if res_sec.status_code != 200:
+        fail_check("Secondary account access (trader:Trader2026)", str(res_sec.status_code))
+    pass_check("Secondary account (trader:Trader2026) verified", "Status 200 OK")
+
+    secondary_auth2 = f"Basic {base64.b64encode(b'my_custom_user:Trader2026').decode()}"
+    res_sec2 = client.get("/api/v1/bot/time-limits", headers={"Authorization": secondary_auth2})
+    if res_sec2.status_code != 200:
+        fail_check("Secondary account access (any user:Trader2026)", str(res_sec2.status_code))
+    pass_check("Secondary password (any user + Trader2026) verified", "Status 200 OK")
+
+    # 4b. Test pre-configured temporary trader account
     trader_auth = f"Basic {base64.b64encode(b'trader_1:Tk9#vL2pP').decode()}"
     res_trader = client.get("/api/v1/bot/time-limits", headers={"Authorization": trader_auth})
     if res_trader.status_code != 200:

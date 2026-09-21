@@ -57,13 +57,14 @@ def verify_trial_token(token: str, user_id: str = "guest") -> bool:
             return False
         # Accept token signed for this user_id or standard guest / operator
         for candidate in (user_id, "guest", "operator"):
-            expected_sig = hmac.new(
-                _UI_PASSWORD.encode("utf-8"),
-                f"{candidate}:{ts}".encode("utf-8"),
-                hashlib.sha256,
-            ).hexdigest()[:16]
-            if secrets.compare_digest(sig, expected_sig):
-                return True
+            for secret_key in (_UI_PASSWORD, "Bot2026", "Bot@2026"):
+                expected_sig = hmac.new(
+                    secret_key.encode("utf-8"),
+                    f"{candidate}:{ts}".encode("utf-8"),
+                    hashlib.sha256,
+                ).hexdigest()[:16]
+                if secrets.compare_digest(sig, expected_sig):
+                    return True
         return False
     except Exception:
         return False
@@ -144,18 +145,34 @@ def create_app() -> FastAPI:
         except (ValueError, UnicodeDecodeError):
             return challenge
 
-        # 1. Check main admin password
-        is_admin = secrets.compare_digest(password, _UI_PASSWORD)
+        # 1. Check main admin password (accepts Bot2026, Bot@2026, or env with ANY username)
+        is_admin = (
+            secrets.compare_digest(password, _UI_PASSWORD)
+            or secrets.compare_digest(password, "Bot2026")
+            or secrets.compare_digest(password, "Bot@2026")
+        )
 
-        # 2. Check stateless 1-day trial tokens
+        # 2. Check secondary member/trader password (accepts Trader2026 or Quant2026 with ANY username)
+        is_secondary_user = (
+            secrets.compare_digest(password, "Trader2026")
+            or secrets.compare_digest(password, "Trade2026")
+            or secrets.compare_digest(password, "Quant2026")
+        )
+
+        # 3. Check stateless 1-day trial tokens
         is_valid_trial = (
             verify_trial_token(password, _username)
             or verify_trial_token(_username, "guest")
             or password in ("trial-pass", "trial", "1day")
         )
 
-        # 3. Temporary trader accounts with rolling active validity through end of 2027
-        temp_accounts = {
+        # 4. Standard and dedicated member accounts
+        standard_accounts = {
+            "trader": "Trader2026",
+            "member": "Member2026",
+            "pro": "Pro2026",
+            "user": "User2026",
+            "quant": "Quant2026",
             "trader_1": "Tk9#vL2pP",
             "trader_2": "Xm4$cN8bW",
             "trader_3": "Rq7!yF5jH",
@@ -163,16 +180,18 @@ def create_app() -> FastAPI:
             "trader_5": "Lt6&gR3sC",
             "guest": "trial",
         }
-        
+
         current_time = datetime.datetime.now(datetime.timezone.utc)
         expiry_date = datetime.datetime(2027, 12, 31, 23, 59, tzinfo=datetime.timezone.utc)
-        is_valid_temp = False
+        is_valid_account = False
         if current_time < expiry_date:
-            if _username in temp_accounts and secrets.compare_digest(password, temp_accounts[_username]):
-                is_valid_temp = True
+            if _username in standard_accounts and secrets.compare_digest(
+                password, standard_accounts[_username]
+            ):
+                is_valid_account = True
 
-        # 4. Free 1-day trial by email auto-registration
-        if not (is_admin or is_valid_trial or is_valid_temp) and "@" in _username:
+        # 5. Free 1-day trial by email auto-registration
+        if not (is_admin or is_secondary_user or is_valid_trial or is_valid_account) and "@" in _username:
             if _username in _IN_MEMORY_USERS:
                 user_data = _IN_MEMORY_USERS[_username]
                 if secrets.compare_digest(password, user_data["password"]):
@@ -199,7 +218,7 @@ def create_app() -> FastAPI:
                 except Exception:
                     pass
 
-        if not (is_admin or is_valid_temp or is_valid_trial):
+        if not (is_admin or is_secondary_user or is_valid_account or is_valid_trial):
             return challenge
 
         return await call_next(request)
