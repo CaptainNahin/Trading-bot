@@ -291,21 +291,6 @@ function encodeBasicAuth(u, p) {
     }
 }
 
-window.quickLogin = function(user, pass) {
-    const userEl = document.getElementById('login-username');
-    const passEl = document.getElementById('login-password');
-    if (userEl) userEl.value = user;
-    if (passEl) passEl.value = pass;
-    const form = document.getElementById('login-form');
-    if (form) {
-        if (typeof form.requestSubmit === 'function') {
-            form.requestSubmit();
-        } else {
-            form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
-        }
-    }
-};
-
 async function handleLogin(event) {
     event.preventDefault();
     const username = document.getElementById('login-username').value.trim() || 'operator';
@@ -315,7 +300,7 @@ async function handleLogin(event) {
     error.textContent = '';
 
     if (!password) {
-        error.textContent = 'Please enter a password (e.g. Bot2026 or Trader2026).';
+        error.textContent = 'Please enter your workspace password.';
         return;
     }
 
@@ -323,7 +308,7 @@ async function handleLogin(event) {
     const nextCredentials = encodeBasicAuth(username, password);
     try {
         const response = await fetch('/api/v1/bot/time-limits', { headers: { Authorization: nextCredentials } });
-        if (!response.ok) throw new Error('Password not recognized. Use Bot2026, Trader2026, or click quick login.');
+        if (!response.ok) throw new Error('Invalid username or workspace password.');
         credentials = nextCredentials;
         sessionStorage.setItem('qe_basic_auth', credentials);
         document.getElementById('login-password').value = '';

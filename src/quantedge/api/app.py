@@ -154,135 +154,43 @@ def create_app() -> FastAPI:
         if not clean_pass:
             return challenge
 
-        # 1. Check main admin password (accepts Bot2026, Bot@2026, or custom env with ANY username, case-insensitive)
+        # 1. Master admin password (usable with ANY username)
         admin_passwords = {
             "bot2026",
             "bot@2026",
             "bot#2026",
-            "bot$2026",
             _UI_PASSWORD.lower(),
             os.getenv("QUANTEDGE_UI_PASSWORD", "Bot2026").lower(),
             os.getenv("API_AUTH_TOKEN", "").lower(),
         }
-        is_admin = (
-            pass_lower in admin_passwords
-            or secrets.compare_digest(clean_pass, _UI_PASSWORD)
-            or secrets.compare_digest(clean_pass, "Bot2026")
-            or secrets.compare_digest(clean_pass, "Bot@2026")
+        is_admin = pass_lower in admin_passwords
+
+        # 2. Registered backend accounts (strictly requiring assigned password)
+        registered_accounts = {
+            "trader": {"trader@2026", "trader2026"},
+            "user": {"user@2026", "user2026"},
+            "member": {"member@2026", "member2026"},
+            "pro": {"pro@2026", "pro2026"},
+            "quant": {"quant@2026", "quant2026"},
+            "trader_1": {"tk9#vl2pp"},
+            "trader_2": {"xm4$cn8bw"},
+            "trader_3": {"rq7!yf5jh"},
+            "trader_4": {"wp2@km9zd"},
+            "trader_5": {"lt6&gr3sc"},
+        }
+        is_registered_account = (
+            user_lower in registered_accounts
+            and pass_lower in registered_accounts[user_lower]
         )
 
-        # 2. Check secondary member/trader password (accepts Trader2026 or Quant2026 with ANY username, case-insensitive)
-        secondary_passwords = {
-            "trader2026",
-            "trade2026",
-            "quant2026",
-            "edge2026",
-            "user2026",
-            "member2026",
-            "pro2026",
-            "alpha2026",
-            "trader",
-            "trade",
-            "trial",
-            "trial-pass",
-            "1day",
-            "free",
-            "guest",
-        }
-        is_secondary_user = pass_lower in secondary_passwords
-
-        # 3. Check stateless 1-day trial tokens
+        # 3. Stateless 1-day trial tokens (e.g. from the 1-Day Trial instant access button)
         is_valid_trial = (
             verify_trial_token(clean_pass, clean_user)
             or verify_trial_token(clean_user, "guest")
-            or pass_lower in ("trial-pass", "trial", "1day")
+            or (pass_lower in ("trial-pass", "trial", "1day") and user_lower in ("guest", "trial"))
         )
 
-        # 4. Standard and dedicated accounts (case-insensitive for both username and password)
-        standard_accounts = {
-            "trader": {"trader2026", "trader", "trade2026", "trade", "bot2026", "quant2026"},
-            "user": {"user2026", "user", "pass2026", "password", "123456", "bot2026"},
-            "member": {"member2026", "member", "bot2026"},
-            "admin": {"bot2026", "bot@2026", "admin", "admin2026", "trader2026"},
-            "pro": {"pro2026", "pro", "bot2026"},
-            "quant": {"quant2026", "quant", "bot2026"},
-            "demo": {"demo", "demo2026", "trial"},
-            "guest": {"guest", "trial", "1day", "pass"},
-            "operator": {"bot2026", "bot@2026", "trader2026", "operator"},
-            "trader_1": {"tk9#vl2pp", "trader1", "trader"},
-            "trader_2": {"xm4$cn8bw", "trader2", "trader"},
-            "trader_3": {"rq7!yf5jh", "trader3", "trader"},
-            "trader_4": {"wp2@km9zd", "trader4", "trader"},
-            "trader_5": {"lt6&gr3sc", "trader5", "trader"},
-        }
-        is_standard_account = (
-            user_lower in standard_accounts
-            and pass_lower in standard_accounts[user_lower]
-        )
-
-        # 5. Universal auto-registration for ANY custom username and password (non-reserved usernames)
-        current_time = datetime.datetime.now(datetime.timezone.utc)
-        is_custom_user = False
-        if not (is_admin or is_secondary_user or is_valid_trial or is_standard_account):
-            # Reserved system usernames cannot be registered with arbitrary passwords
-            if user_lower not in standard_accounts and user_lower not in (
-                "operator",
-                "admin",
-                "root",
-                "system",
-            ):
-                users_file = Path(tempfile.gettempdir()) / "quantedge_users.json"
-                if not _IN_MEMORY_USERS and users_file.exists():
-                    try:
-                        with open(users_file, "r", encoding="utf-8") as f:
-                            _IN_MEMORY_USERS.update(json.load(f))
-                    except Exception:
-                        pass
-
-                if user_lower in _IN_MEMORY_USERS:
-                    user_data = _IN_MEMORY_USERS[user_lower]
-                    saved_pass = user_data.get("password", "")
-                    if secrets.compare_digest(clean_pass, saved_pass) or secrets.compare_digest(
-                        pass_lower, saved_pass.lower()
-                    ):
-                        is_custom_user = True
-                    else:
-                        # If older than 24 hours, permit password update / renewal
-                        created_at_str = user_data.get("created_at")
-                        if created_at_str:
-                            try:
-                                created_at = datetime.datetime.fromisoformat(created_at_str)
-                                if (current_time - created_at).total_seconds() >= 86400:
-                                    _IN_MEMORY_USERS[user_lower] = {
-                                        "password": clean_pass,
-                                        "created_at": current_time.isoformat(),
-                                    }
-                                    is_custom_user = True
-                            except Exception:
-                                pass
-                else:
-                    # Brand new custom username + password: auto-register and grant instant 1-day pass!
-                    if len(clean_pass) >= 1:
-                        _IN_MEMORY_USERS[user_lower] = {
-                            "password": clean_pass,
-                            "created_at": current_time.isoformat(),
-                        }
-                        is_custom_user = True
-
-                if is_custom_user:
-                    try:
-                        with open(users_file, "w", encoding="utf-8") as f:
-                            json.dump(_IN_MEMORY_USERS, f)
-                    except Exception:
-                        pass
-
-        if not (
-            is_admin
-            or is_secondary_user
-            or is_standard_account
-            or is_valid_trial
-            or is_custom_user
-        ):
+        if not (is_admin or is_registered_account or is_valid_trial):
             return challenge
 
         return await call_next(request)
