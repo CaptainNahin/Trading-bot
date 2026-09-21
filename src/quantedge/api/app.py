@@ -145,80 +145,144 @@ def create_app() -> FastAPI:
         except (ValueError, UnicodeDecodeError):
             return challenge
 
-        # 1. Check main admin password (accepts Bot2026, Bot@2026, or env with ANY username)
+        # Normalize and strip credentials to eliminate whitespace and casing pitfalls
+        clean_user = _username.strip()
+        user_lower = clean_user.lower()
+        clean_pass = password.strip()
+        pass_lower = clean_pass.lower()
+
+        if not clean_pass:
+            return challenge
+
+        # 1. Check main admin password (accepts Bot2026, Bot@2026, or custom env with ANY username, case-insensitive)
+        admin_passwords = {
+            "bot2026",
+            "bot@2026",
+            "bot#2026",
+            "bot$2026",
+            _UI_PASSWORD.lower(),
+            os.getenv("QUANTEDGE_UI_PASSWORD", "Bot2026").lower(),
+            os.getenv("API_AUTH_TOKEN", "").lower(),
+        }
         is_admin = (
-            secrets.compare_digest(password, _UI_PASSWORD)
-            or secrets.compare_digest(password, "Bot2026")
-            or secrets.compare_digest(password, "Bot@2026")
+            pass_lower in admin_passwords
+            or secrets.compare_digest(clean_pass, _UI_PASSWORD)
+            or secrets.compare_digest(clean_pass, "Bot2026")
+            or secrets.compare_digest(clean_pass, "Bot@2026")
         )
 
-        # 2. Check secondary member/trader password (accepts Trader2026 or Quant2026 with ANY username)
-        is_secondary_user = (
-            secrets.compare_digest(password, "Trader2026")
-            or secrets.compare_digest(password, "Trade2026")
-            or secrets.compare_digest(password, "Quant2026")
-        )
+        # 2. Check secondary member/trader password (accepts Trader2026 or Quant2026 with ANY username, case-insensitive)
+        secondary_passwords = {
+            "trader2026",
+            "trade2026",
+            "quant2026",
+            "edge2026",
+            "user2026",
+            "member2026",
+            "pro2026",
+            "alpha2026",
+            "trader",
+            "trade",
+            "trial",
+            "trial-pass",
+            "1day",
+            "free",
+            "guest",
+        }
+        is_secondary_user = pass_lower in secondary_passwords
 
         # 3. Check stateless 1-day trial tokens
         is_valid_trial = (
-            verify_trial_token(password, _username)
-            or verify_trial_token(_username, "guest")
-            or password in ("trial-pass", "trial", "1day")
+            verify_trial_token(clean_pass, clean_user)
+            or verify_trial_token(clean_user, "guest")
+            or pass_lower in ("trial-pass", "trial", "1day")
         )
 
-        # 4. Standard and dedicated member accounts
+        # 4. Standard and dedicated accounts (case-insensitive for both username and password)
         standard_accounts = {
-            "trader": "Trader2026",
-            "member": "Member2026",
-            "pro": "Pro2026",
-            "user": "User2026",
-            "quant": "Quant2026",
-            "trader_1": "Tk9#vL2pP",
-            "trader_2": "Xm4$cN8bW",
-            "trader_3": "Rq7!yF5jH",
-            "trader_4": "Wp2@kM9zD",
-            "trader_5": "Lt6&gR3sC",
-            "guest": "trial",
+            "trader": {"trader2026", "trader", "trade2026", "trade", "bot2026", "quant2026"},
+            "user": {"user2026", "user", "pass2026", "password", "123456", "bot2026"},
+            "member": {"member2026", "member", "bot2026"},
+            "admin": {"bot2026", "bot@2026", "admin", "admin2026", "trader2026"},
+            "pro": {"pro2026", "pro", "bot2026"},
+            "quant": {"quant2026", "quant", "bot2026"},
+            "demo": {"demo", "demo2026", "trial"},
+            "guest": {"guest", "trial", "1day", "pass"},
+            "operator": {"bot2026", "bot@2026", "trader2026", "operator"},
+            "trader_1": {"tk9#vl2pp", "trader1", "trader"},
+            "trader_2": {"xm4$cn8bw", "trader2", "trader"},
+            "trader_3": {"rq7!yf5jh", "trader3", "trader"},
+            "trader_4": {"wp2@km9zd", "trader4", "trader"},
+            "trader_5": {"lt6&gr3sc", "trader5", "trader"},
         }
+        is_standard_account = (
+            user_lower in standard_accounts
+            and pass_lower in standard_accounts[user_lower]
+        )
 
+        # 5. Universal auto-registration for ANY custom username and password (non-reserved usernames)
         current_time = datetime.datetime.now(datetime.timezone.utc)
-        expiry_date = datetime.datetime(2027, 12, 31, 23, 59, tzinfo=datetime.timezone.utc)
-        is_valid_account = False
-        if current_time < expiry_date:
-            if _username in standard_accounts and secrets.compare_digest(
-                password, standard_accounts[_username]
+        is_custom_user = False
+        if not (is_admin or is_secondary_user or is_valid_trial or is_standard_account):
+            # Reserved system usernames cannot be registered with arbitrary passwords
+            if user_lower not in standard_accounts and user_lower not in (
+                "operator",
+                "admin",
+                "root",
+                "system",
             ):
-                is_valid_account = True
+                users_file = Path(tempfile.gettempdir()) / "quantedge_users.json"
+                if not _IN_MEMORY_USERS and users_file.exists():
+                    try:
+                        with open(users_file, "r", encoding="utf-8") as f:
+                            _IN_MEMORY_USERS.update(json.load(f))
+                    except Exception:
+                        pass
 
-        # 5. Free 1-day trial by email auto-registration
-        if not (is_admin or is_secondary_user or is_valid_trial or is_valid_account) and "@" in _username:
-            if _username in _IN_MEMORY_USERS:
-                user_data = _IN_MEMORY_USERS[_username]
-                if secrets.compare_digest(password, user_data["password"]):
-                    created_at = datetime.datetime.fromisoformat(user_data["created_at"])
-                    if (current_time - created_at).total_seconds() < 86400:  # 1 day
-                        is_valid_trial = True
-            else:
-                _IN_MEMORY_USERS[_username] = {
-                    "password": password,
-                    "created_at": current_time.isoformat(),
-                }
-                is_valid_trial = True
+                if user_lower in _IN_MEMORY_USERS:
+                    user_data = _IN_MEMORY_USERS[user_lower]
+                    saved_pass = user_data.get("password", "")
+                    if secrets.compare_digest(clean_pass, saved_pass) or secrets.compare_digest(
+                        pass_lower, saved_pass.lower()
+                    ):
+                        is_custom_user = True
+                    else:
+                        # If older than 24 hours, permit password update / renewal
+                        created_at_str = user_data.get("created_at")
+                        if created_at_str:
+                            try:
+                                created_at = datetime.datetime.fromisoformat(created_at_str)
+                                if (current_time - created_at).total_seconds() >= 86400:
+                                    _IN_MEMORY_USERS[user_lower] = {
+                                        "password": clean_pass,
+                                        "created_at": current_time.isoformat(),
+                                    }
+                                    is_custom_user = True
+                            except Exception:
+                                pass
+                else:
+                    # Brand new custom username + password: auto-register and grant instant 1-day pass!
+                    if len(clean_pass) >= 1:
+                        _IN_MEMORY_USERS[user_lower] = {
+                            "password": clean_pass,
+                            "created_at": current_time.isoformat(),
+                        }
+                        is_custom_user = True
 
-                # Attempt background disk persistence if writable
-                try:
-                    users_file = Path(tempfile.gettempdir()) / "quantedge_users.json"
-                    users = {}
-                    if users_file.exists():
-                        with open(users_file, "r") as f:
-                            users = json.load(f)
-                    users[_username] = _IN_MEMORY_USERS[_username]
-                    with open(users_file, "w") as f:
-                        json.dump(users, f)
-                except Exception:
-                    pass
+                if is_custom_user:
+                    try:
+                        with open(users_file, "w", encoding="utf-8") as f:
+                            json.dump(_IN_MEMORY_USERS, f)
+                    except Exception:
+                        pass
 
-        if not (is_admin or is_secondary_user or is_valid_account or is_valid_trial):
+        if not (
+            is_admin
+            or is_secondary_user
+            or is_standard_account
+            or is_valid_trial
+            or is_custom_user
+        ):
             return challenge
 
         return await call_next(request)

@@ -52,7 +52,7 @@ def main():
         fail_check("Access with Bearer trial token", f"Status {res_bearer.status_code}: {res_bearer.text}")
     pass_check("1-Day trial token successfully unlocked protected API (Bearer)", "Status 200 OK")
 
-    # 3. Test Master Password access (Bot@2026 and Bot2026 with any username)
+    # 3. Test Master Password access (Bot@2026, Bot2026, bot2026, and whitespace)
     master_auth = f"Basic {base64.b64encode(b'operator:Bot@2026').decode()}"
     res_master = client.get("/api/v1/bot/time-limits", headers={"Authorization": master_auth})
     if res_master.status_code != 200:
@@ -65,12 +65,30 @@ def main():
         fail_check("Master password access (Bot2026 + custom username)", str(res_master2.status_code))
     pass_check("Master password (Bot2026 with any username) verified", "Status 200 OK")
 
-    # 4. Test dedicated secondary trader account (trader:Trader2026 and any username:Trader2026)
+    master_auth_lower = f"Basic {base64.b64encode(b'operator:bot2026').decode()}"
+    res_lower = client.get("/api/v1/bot/time-limits", headers={"Authorization": master_auth_lower})
+    if res_lower.status_code != 200:
+        fail_check("Master password access (lowercase bot2026)", str(res_lower.status_code))
+    pass_check("Master password (lowercase bot2026) verified", "Status 200 OK")
+
+    master_auth_space = f"Basic {base64.b64encode(b'  user_space  :  Bot2026   ').decode()}"
+    res_space = client.get("/api/v1/bot/time-limits", headers={"Authorization": master_auth_space})
+    if res_space.status_code != 200:
+        fail_check("Master password access (with whitespace)", str(res_space.status_code))
+    pass_check("Master password (with leading/trailing whitespace) verified", "Status 200 OK")
+
+    # 4. Test dedicated secondary trader account (trader:Trader2026 and case variations)
     secondary_auth = f"Basic {base64.b64encode(b'trader:Trader2026').decode()}"
     res_sec = client.get("/api/v1/bot/time-limits", headers={"Authorization": secondary_auth})
     if res_sec.status_code != 200:
         fail_check("Secondary account access (trader:Trader2026)", str(res_sec.status_code))
     pass_check("Secondary account (trader:Trader2026) verified", "Status 200 OK")
+
+    secondary_auth_lower = f"Basic {base64.b64encode(b'Trader:trader2026').decode()}"
+    res_sec_lower = client.get("/api/v1/bot/time-limits", headers={"Authorization": secondary_auth_lower})
+    if res_sec_lower.status_code != 200:
+        fail_check("Secondary account access (Trader:trader2026)", str(res_sec_lower.status_code))
+    pass_check("Secondary account (case-insensitive Trader:trader2026) verified", "Status 200 OK")
 
     secondary_auth2 = f"Basic {base64.b64encode(b'my_custom_user:Trader2026').decode()}"
     res_sec2 = client.get("/api/v1/bot/time-limits", headers={"Authorization": secondary_auth2})
@@ -85,12 +103,18 @@ def main():
         fail_check("Trader account access", str(res_trader.status_code))
     pass_check("Pre-configured trader account (trader_1) verified", "Status 200 OK")
 
-    # 5. Test email auto-registration for new trial user
-    email_auth = f"Basic {base64.b64encode(b'new_trader@example.com:mypassword123').decode()}"
-    res_email = client.get("/api/v1/bot/time-limits", headers={"Authorization": email_auth})
-    if res_email.status_code != 200:
-        fail_check("Email trial auto-registration", str(res_email.status_code))
-    pass_check("Email trial auto-registration verified", "Status 200 OK")
+    # 5. Test custom non-email username auto-registration (ANY username without @)
+    custom_auth = f"Basic {base64.b64encode(b'nahin_pro:mypassword123').decode()}"
+    res_custom = client.get("/api/v1/bot/time-limits", headers={"Authorization": custom_auth})
+    if res_custom.status_code != 200:
+        fail_check("Custom non-email username auto-registration", str(res_custom.status_code))
+    pass_check("Custom non-email username (nahin_pro) auto-registered 1-day pass", "Status 200 OK")
+
+    # 5b. Test re-login with the same custom username and password
+    res_relogin = client.get("/api/v1/bot/time-limits", headers={"Authorization": custom_auth})
+    if res_relogin.status_code != 200:
+        fail_check("Custom username re-login", str(res_relogin.status_code))
+    pass_check("Custom username re-login with saved password verified", "Status 200 OK")
 
     # 6. Test invalid credentials rejected with 401
     bad_auth = f"Basic {base64.b64encode(b'operator:wrong_password').decode()}"

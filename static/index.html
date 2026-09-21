@@ -249,6 +249,22 @@
                 <span style="flex: 1; height: 1px; background: var(--line);"></span>
             </div>
 
+            <!-- 1-Click Preset Account Access -->
+            <div style="margin-bottom: 14px;">
+                <div style="font: 9px var(--mono); color: var(--muted); margin-bottom: 6px; letter-spacing: 0.5px;">1-CLICK INSTANT LOGIN:</div>
+                <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                    <button type="button" onclick="quickLogin('admin', 'Bot2026')" style="background: rgba(224, 71, 36, 0.15); border: 1px solid rgba(224, 71, 36, 0.4); color: #fff; padding: 5px 9px; border-radius: 3px; font: 10px var(--mono); cursor: pointer; transition: background 0.2s;">
+                        ⚡ Main Pass (Bot2026)
+                    </button>
+                    <button type="button" onclick="quickLogin('trader', 'Trader2026')" style="background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line); color: #fff; padding: 5px 9px; border-radius: 3px; font: 10px var(--mono); cursor: pointer; transition: background 0.2s;">
+                        📈 Trader (Trader2026)
+                    </button>
+                    <button type="button" onclick="quickLogin('user', 'User2026')" style="background: rgba(255, 255, 255, 0.06); border: 1px solid var(--line); color: #fff; padding: 5px 9px; border-radius: 3px; font: 10px var(--mono); cursor: pointer; transition: background 0.2s;">
+                        👤 User (User2026)
+                    </button>
+                </div>
+            </div>
+
             <form id="login-form">
                 <label class="field">
                     <span>EMAIL (OR OPERATOR NAME)</span>
@@ -267,10 +283,10 @@
 
             <div class="login-guide" style="margin-top: 18px; padding: 12px; background: rgba(255,255,255,0.02); border: 1px solid var(--line); border-radius: 4px; font-size: 11px; color: var(--muted); line-height: 1.5;">
                 <div style="font: 10px var(--mono); color: #fff; margin-bottom: 6px; font-weight: 600;">LOGIN INFORMATION & ACCESS OPTIONS:</div>
-                <div style="margin-bottom: 4px;">• <strong>Main Pass:</strong> Any username + password <code>Bot2026</code> (or <code>Bot@2026</code>).</div>
+                <div style="margin-bottom: 4px;">• <strong>Main Pass:</strong> Enter any username + password <code>Bot2026</code> (or click the ⚡ Main Pass button).</div>
                 <div style="margin-bottom: 4px;">• <strong>Trader Account:</strong> Username <code>trader</code> + password <code>Trader2026</code> (or any username + <code>Trader2026</code>).</div>
-                <div style="margin-bottom: 4px;">• <strong>1-Day Free Pass:</strong> Click the "Start 1-Day Free Trial" button above for instant 24h access.</div>
-                <div>• <strong>Email Trial:</strong> Enter your email + any chosen password to auto-register a 1-day pass.</div>
+                <div style="margin-bottom: 4px;">• <strong>Custom Account:</strong> Enter ANY username and ANY password to activate a 1-day pass.</div>
+                <div>• <strong>Instant Guest Pass:</strong> Click the "Start 1-Day Free Trial" button above for instant 24h access.</div>
             </div>
 
             <div class="login-footnote">

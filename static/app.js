@@ -283,18 +283,47 @@ function closeLogin() {
     if (!credentials) document.getElementById('login-layer').hidden = true;
 }
 
+function encodeBasicAuth(u, p) {
+    try {
+        return `Basic ${btoa(unescape(encodeURIComponent(`${u}:${p}`)))}`;
+    } catch (e) {
+        return `Basic ${btoa(`${u}:${p}`)}`;
+    }
+}
+
+window.quickLogin = function(user, pass) {
+    const userEl = document.getElementById('login-username');
+    const passEl = document.getElementById('login-password');
+    if (userEl) userEl.value = user;
+    if (passEl) passEl.value = pass;
+    const form = document.getElementById('login-form');
+    if (form) {
+        if (typeof form.requestSubmit === 'function') {
+            form.requestSubmit();
+        } else {
+            form.dispatchEvent(new Event('submit', { cancelable: true, bubbles: true }));
+        }
+    }
+};
+
 async function handleLogin(event) {
     event.preventDefault();
     const username = document.getElementById('login-username').value.trim() || 'operator';
-    const password = document.getElementById('login-password').value;
+    const password = document.getElementById('login-password').value.trim();
     const error = document.getElementById('login-error');
     const button = event.currentTarget.querySelector('button[type="submit"]');
     error.textContent = '';
+
+    if (!password) {
+        error.textContent = 'Please enter a password (e.g. Bot2026 or Trader2026).';
+        return;
+    }
+
     button.disabled = true;
-    const nextCredentials = `Basic ${btoa(`${username}:${password}`)}`;
+    const nextCredentials = encodeBasicAuth(username, password);
     try {
         const response = await fetch('/api/v1/bot/time-limits', { headers: { Authorization: nextCredentials } });
-        if (!response.ok) throw new Error('Workspace password rejected.');
+        if (!response.ok) throw new Error('Password not recognized. Use Bot2026, Trader2026, or click quick login.');
         credentials = nextCredentials;
         sessionStorage.setItem('qe_basic_auth', credentials);
         document.getElementById('login-password').value = '';
