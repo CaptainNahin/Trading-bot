@@ -95,10 +95,10 @@ def generate_signal_decision(
     scan = run_scan(
         [symbol],
         horizon=horizon,
-        # ``run_scan`` pins a single vendor; None here means "no preference", so
-        # it falls through to the routed default rather than being passed on as
-        # a provider named None.
-        provider=provider_name or "binance",
+        # Passing provider_name (or None) allows the provider registry to route
+        # automatically based on the asset class of the symbol (crypto -> binance,
+        # forex/commodity -> twelvedata).
+        provider=provider_name,
         candle_fetcher=candle_fetcher,
     )
     candidate = scan.candidates[0] if scan.candidates else None
@@ -128,12 +128,12 @@ def generate_signal_decision(
     if provider is not None:
         try:
             validated = validate_llm_response(provider.evaluate_signal_context(context), context)
-        except QuantEdgeError as exc:
-            # A failed review must not upgrade into a signal. The deterministic
-            # candidate stands on its own and is reported as such.
+        except (QuantEdgeError, Exception) as exc:
+            # A failed review must not upgrade into a signal or block execution.
+            # The deterministic candidate stands on its own and is reported as such.
             log.warning(
                 "llm review unavailable; returning the deterministic candidate",
-                extra={"symbol": symbol, "code": exc.code},
+                extra={"symbol": symbol, "error": str(exc)},
             )
 
     # Conservative-only review. The scanner owns the direction; the reviewer owns
@@ -355,7 +355,11 @@ def generate_best_trade_recommendation(
     # named forex/metal pairs no healthy provider serves here, so the sweep was
     # searching a set that could not answer.
     supported = set(supported_symbols())
-    all_syms = [s for s in supported_symbols("crypto") if s in supported]
+    # Prioritise the most liquid primary symbols to bound latency within serverless timeouts
+    primary_crypto = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT"]
+    all_syms = [s for s in primary_crypto if s in supported]
+    if not all_syms:
+        all_syms = [s for s in supported_symbols("crypto") if s in supported][:4]
     if not all_syms:
         all_syms = supported_symbols()[:3]
 
@@ -376,7 +380,7 @@ def generate_best_trade_recommendation(
             scan_res = run_scan(
                 all_syms,
                 horizon=hz,
-                provider=provider_name or "binance",
+                provider=provider_name,
                 candle_fetcher=candle_fetcher,
             )
             scored.extend(

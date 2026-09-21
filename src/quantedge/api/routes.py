@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -364,14 +365,21 @@ def post_bot_chat(request: ChatRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=exc.message) from exc
     except QuantEdgeError as exc:
         raise HTTPException(status_code=503, detail=f"{exc.code}: {exc.message}") from exc
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        log.warning("chat request timed out or cancelled", extra={"error": str(exc)})
+        return bot_chat.ChatReply(
+            text=(
+                "Market analysis took longer than expected to gather live exchange data. "
+                "Please retry with a specific pair and timeframe, e.g. `USD/JPY 5m` or `BTC 15m`."
+            ),
+            intent=bot_chat.Intent.SIGNAL,
+            warnings=["Analysis timeout: exchange data collection took longer than expected."],
+        ).to_dict()
     except Exception as exc:
-        # No traceback in the response body: it names internal paths and can carry
-        # argument values from the failing frame. It goes to the log, which is
-        # redacted, and the caller gets the type and message only.
         log.exception("chat request failed")
-        raise HTTPException(
-            status_code=500, detail=f"{type(exc).__name__}: {exc}"
-        ) from exc
+        exc_str = str(exc).strip()
+        detail = f"{type(exc).__name__}: {exc_str}" if exc_str else f"{type(exc).__name__} during market analysis"
+        raise HTTPException(status_code=500, detail=detail) from exc
     return reply.to_dict()
 
 

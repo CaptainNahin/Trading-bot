@@ -7,6 +7,7 @@ All settled records are immutable and appended via the repository layer.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from decimal import Decimal
 
 from quantedge.contracts import (
     AIDecision,

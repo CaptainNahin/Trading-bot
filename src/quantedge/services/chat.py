@@ -182,16 +182,38 @@ _SYMBOL_ALIASES: dict[str, str] = {
     "ETHEREUM": "ETHUSDT",
     "BNB": "BNBUSDT",
     "SOL": "SOLUSDT",
+    "SOLANA": "SOLUSDT",
     "XRP": "XRPUSDT",
+    "RIPPLE": "XRPUSDT",
     "DOGE": "DOGEUSDT",
+    "DOGECOIN": "DOGEUSDT",
     "ADA": "ADAUSDT",
+    "CARDANO": "ADAUSDT",
     "AVAX": "AVAXUSDT",
+    "AVALANCHE": "AVAXUSDT",
+    "DOT": "DOTUSDT",
+    "POLKADOT": "DOTUSDT",
+    "LINK": "LINKUSDT",
+    "CHAINLINK": "LINKUSDT",
+    "LTC": "LTCUSDT",
+    "LITECOIN": "LTCUSDT",
+    "POL": "POLUSDT",
+    "MATIC": "POLUSDT",
     "GOLD": "XAUUSD",
     "SILVER": "XAGUSD",
     "OIL": "WTICOUSD",
+    "CRUDE": "WTICOUSD",
     "EUR": "EURUSD",
+    "EURO": "EURUSD",
     "GBP": "GBPUSD",
+    "POUND": "GBPUSD",
+    "CABLE": "GBPUSD",
     "YEN": "USDJPY",
+    "JPY": "USDJPY",
+    "CAD": "USDCAD",
+    "CHF": "USDCHF",
+    "AUD": "AUDUSD",
+    "NZD": "NZDUSD",
 }
 
 _SIGNAL_ID = re.compile(r"\b((?:rec|mem|sig)-[0-9a-f]{6,})\b", re.IGNORECASE)
@@ -258,17 +280,42 @@ def parse_intent(message: str) -> ChatIntent:
 def _extract_symbol(text: str) -> str | None:
     """The first supported symbol named in the message.
 
-    Checked against the symbol registry rather than pattern-matched, so an
-    unsupported ticker is reported as unsupported instead of being sent to a
-    provider that will reject it.
+    Supports canonical tickers (USDJPY, BTCUSDT), separator-delimited pairs
+    (USD/JPY, EUR/USD, BTC-USDT), two-token pairs (USD JPY), and common asset aliases.
     """
-    tokens = re.findall(r"[A-Za-z]{2,12}(?:USDT|USD)?", text.upper())
+    from quantedge.symbols import normalize_symbol
+
+    # 1. Separator pairs: e.g. "USD/JPY", "EUR/USD", "BTC/USDT", "BTC-USDT"
+    sep_matches = re.findall(r"\b[A-Za-z0-9]{2,6}\s*[/_\-:]\s*[A-Za-z0-9]{2,6}\b", text)
+    for m in sep_matches:
+        try:
+            cand = normalize_symbol(m)
+            if is_supported(cand):
+                return cand
+        except Exception:
+            pass
+
+    # 2. Space-separated currency/asset pairs: e.g. "USD JPY", "EUR USD", "BTC USDT"
+    tokens = re.findall(r"[A-Za-z0-9]{2,12}", text.upper())
+    for i in range(len(tokens) - 1):
+        pair = tokens[i] + tokens[i + 1]
+        try:
+            if is_supported(pair):
+                return normalize_symbol(pair)
+        except Exception:
+            pass
+
+    # 3. Direct supported tokens and aliases
     for token in tokens:
-        if is_supported(token):
-            return token
+        try:
+            if is_supported(token):
+                return normalize_symbol(token)
+        except Exception:
+            pass
         alias = _SYMBOL_ALIASES.get(token)
         if alias is not None and is_supported(alias):
             return alias
+
     return None
 
 
@@ -383,6 +430,17 @@ def _handle_signal(
                 data={"symbol": "ANY", "error_code": exc.code},
                 warnings=[exc.message],
             )
+        except Exception as exc:
+            log.exception("global signal sweep failed")
+            return ChatReply(
+                text=(
+                    f"Market analysis is temporarily unavailable ({type(exc).__name__}). "
+                    "Please try specifying a symbol and timeframe, e.g. `USD/JPY 5m` or `BTC 15m`."
+                ),
+                intent=Intent.SIGNAL,
+                data={"symbol": "ANY", "error": str(exc)},
+                warnings=[f"Global scan failed: {exc}"],
+            )
 
         minutes_used = parsed.minutes or horizon_minutes(rec.horizon)
         assumption_note = _alternatives_note(alternatives)
@@ -423,6 +481,17 @@ def _handle_signal(
                 intent=Intent.SIGNAL,
                 data={"symbol": symbol, "error_code": exc.code},
                 warnings=[exc.message],
+            )
+        except Exception as exc:
+            log.exception("signal recommendation failed", extra={"symbol": symbol})
+            return ChatReply(
+                text=(
+                    f"Market data or analysis for {symbol} is temporarily unavailable ({type(exc).__name__}). "
+                    "No trade recommendation was issued."
+                ),
+                intent=Intent.SIGNAL,
+                data={"symbol": symbol, "error": str(exc)},
+                warnings=[f"Analysis failed: {exc}"],
             )
 
     # The expiry the user is told is the duration they chose, not the horizon's.

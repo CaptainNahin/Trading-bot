@@ -87,7 +87,8 @@ class SeekAILLMProvider(BaseLLMProvider):
             SeekAILLMProvider._ACTIVE_MODEL = self.model_name
         raw_url = base_url or settings.seekai_base_url or _DEFAULT_BASE_URL
         self._base_url = _normalise_base_url(raw_url)
-        self._timeout = settings.llm_timeout_seconds or _TIMEOUT_SECONDS
+        raw_timeout = float(settings.llm_timeout_seconds or _TIMEOUT_SECONDS)
+        self._timeout = min(raw_timeout, 15.0)
 
     @property
     def base_url(self) -> str:
@@ -194,6 +195,7 @@ class SeekAILLMProvider(BaseLLMProvider):
             ],
             max_tokens=_MAX_TOKENS,
             temperature=_TEMPERATURE,
+            timeout=min(self._timeout, 6.0),
         )
         payload = extract_json_object(text, provider=self.provider_name)
 
@@ -269,6 +271,7 @@ class SeekAILLMProvider(BaseLLMProvider):
                 ],
                 max_tokens=2048,
                 temperature=0.2,
+                timeout=min(self._timeout, 10.0),
             )
             clean_text = text.strip()
             if "```" in clean_text:
@@ -331,6 +334,7 @@ class SeekAILLMProvider(BaseLLMProvider):
             messages=messages,
             max_tokens=_MAX_TOKENS,
             temperature=0.6,
+            timeout=min(self._timeout, 12.0),
         )
 
     def _call_model(
@@ -339,15 +343,19 @@ class SeekAILLMProvider(BaseLLMProvider):
         *,
         max_tokens: int = _MAX_TOKENS,
         temperature: float = _TEMPERATURE,
+        timeout: float | None = None,
     ) -> str:
         """Call Seek AI chat completion endpoint with automatic fallback on quota exhaustion."""
         endpoint = f"{self._base_url}/chat/completions"
         active_candidate = SeekAILLMProvider._ACTIVE_MODEL or self.model_name
         models_to_try: list[str] = [active_candidate]
-        for cand in ("deepseek-v4-flash", self._fallback_model, "DeepSeek-V4.1-Flash", "glm-5.3"):
+        for cand in (self._fallback_model, "deepseek-v4-flash", "glm-5.3"):
             if cand and cand not in models_to_try:
                 models_to_try.append(cand)
+        # Bounded candidates: at most 2 real models
+        models_to_try = models_to_try[:2]
 
+        effective_budget = timeout or self._timeout
         last_exc: Exception | None = None
         for idx, model_name in enumerate(models_to_try):
             has_next = idx < len(models_to_try) - 1
@@ -357,7 +365,7 @@ class SeekAILLMProvider(BaseLLMProvider):
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             }
-            call_timeout = 15.0 if has_next else self._timeout
+            call_timeout = (effective_budget / 2.0) if has_next else effective_budget
             try:
                 with httpx.Client(timeout=call_timeout) as client:
                     response = client.post(endpoint, headers=self._headers(), json=body)
@@ -371,7 +379,7 @@ class SeekAILLMProvider(BaseLLMProvider):
                     SeekAILLMProvider._ACTIVE_MODEL = next_cand
                     continue
                 if isinstance(exc, httpx.TimeoutException):
-                    raise ProviderTimeoutError(self.provider_name, self._timeout) from exc
+                    raise ProviderTimeoutError(self.provider_name, call_timeout) from exc
                 raise ProviderUnavailableError(
                     self.provider_name,
                     f"{self._base_url} unreachable: {type(exc).__name__}",
@@ -383,6 +391,7 @@ class SeekAILLMProvider(BaseLLMProvider):
                 httpx.codes.FORBIDDEN,
                 httpx.codes.NOT_FOUND,
                 httpx.codes.BAD_REQUEST,
+                httpx.codes.TOO_MANY_REQUESTS,
                 httpx.codes.GATEWAY_TIMEOUT,
                 httpx.codes.BAD_GATEWAY,
                 httpx.codes.SERVICE_UNAVAILABLE,
@@ -403,38 +412,6 @@ class SeekAILLMProvider(BaseLLMProvider):
                     self.provider_name,
                     f"Seek AI rejected credential or quota exhausted (HTTP 403): {err_text[:150]}",
                 )
-
-            # Check if rate limited (HTTP 429) or transient gateway error (502, 503, 504)
-            if response.status_code in (
-                httpx.codes.TOO_MANY_REQUESTS,
-                httpx.codes.BAD_GATEWAY,
-                httpx.codes.SERVICE_UNAVAILABLE,
-                httpx.codes.GATEWAY_TIMEOUT,
-            ):
-                for retry_attempt in range(1, 3):
-                    wait_time = 2.0 * retry_attempt
-                    if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
-                        retry_after_hdr = response.headers.get("retry-after")
-                        if retry_after_hdr:
-                            wait_time = float(retry_after_hdr)
-                    log.warning(
-                        f"seekai HTTP {response.status_code}; backing off {wait_time:.1f}s before retry (attempt {retry_attempt}/2)",
-                        extra={"status": response.status_code, "attempt": retry_attempt},
-                    )
-                    time.sleep(wait_time)
-                    try:
-                        with httpx.Client(timeout=self._timeout) as retry_client:
-                            retry_resp = retry_client.post(endpoint, headers=self._headers(), json=body)
-                        response = retry_resp
-                        if response.status_code == httpx.codes.OK or response.status_code not in (
-                            httpx.codes.TOO_MANY_REQUESTS,
-                            httpx.codes.BAD_GATEWAY,
-                            httpx.codes.SERVICE_UNAVAILABLE,
-                            httpx.codes.GATEWAY_TIMEOUT,
-                        ):
-                            break
-                    except Exception as retry_exc:
-                        log.warning("seekai retry failed", extra={"error": str(retry_exc)})
 
             if response.status_code != httpx.codes.OK and has_next:
                 next_cand = models_to_try[idx + 1]
