@@ -187,6 +187,7 @@ def generate_trade_recommendation(
     asset_class: AssetClass | str | None = None,
     provider_name: str | None = None,
     candle_fetcher: Any = None,
+    hold_minutes: int | None = None,
 ) -> TradeRecommendation:
     """Produce a memory-augmented recommendation, or raise :class:`NoTradeReason`.
 
@@ -278,7 +279,8 @@ def generate_trade_recommendation(
 
     ast = _resolve_asset_class(symbol, asset_class)
     now = utc_now()
-    expiry = expiry_for(horizon_minutes(horizon), now)
+    dur = hold_minutes if hold_minutes is not None else horizon_minutes(horizon)
+    expiry = expiry_for(dur, now)
 
     # The composite score as a percentage. Derived, not measured: it is exactly
     # decision.heuristic_score * 100, the same evidence-agreement score already
@@ -361,19 +363,28 @@ def generate_best_trade_recommendation(
     if not all_syms:
         all_syms = [s for s in supported_symbols("crypto") if s in supported][:4]
     if not all_syms:
-        all_syms = supported_symbols()[:3]
+        all_syms = supported_symbols()[:4]
 
     if time_limit_minutes is not None:
-        horizons = [resolve_time_limit(f"{time_limit_minutes}m")]
+        target_hz = resolve_time_limit(f"{time_limit_minutes}m")
+        # Tailored search horizons for the user's desired trade duration (1m, 5m, 10m, 15m, etc.)
+        if time_limit_minutes <= 3:
+            search_horizons = ["1m", "3m", "5m"]
+        elif time_limit_minutes <= 7:
+            search_horizons = ["5m", "3m", "10m", "1m"]
+        elif time_limit_minutes <= 12:
+            search_horizons = ["10m", "5m", "15m"]
+        elif time_limit_minutes <= 25:
+            search_horizons = ["15m", "10m", "5m", "30m"]
+        elif time_limit_minutes <= 45:
+            search_horizons = ["30m", "15m", "1h"]
+        else:
+            search_horizons = ["1h", "30m", "15m"]
+        horizons = [target_hz] + [h for h in search_horizons if h != target_hz]
     else:
-        # Default representative horizons to find the best trade without hitting rate limits
-        horizons = ["15m", "1h"]
+        # Default representative horizons: prioritize fast, active intraday timeframes over 1h
+        horizons = ["5m", "15m", "10m", "1h"]
 
-    # Every candidate, not just the strongest. The scanner scores a setup; the
-    # recommendation stage then applies gates the scanner never saw -- reward:risk
-    # above all. Keeping only the top scorer meant one candidate failing on
-    # geometry was reported as "no setup on any symbol", which is a different and
-    # much worse claim than the truth, and it hid setups that were ready to go.
     scored: list[tuple[float, str, str, str]] = []
     for hz in horizons:
         try:
@@ -396,11 +407,16 @@ def generate_best_trade_recommendation(
             "No trade setups found across any symbol or timeframe right now.",
         )
 
-    # Best first, then walk down. The first decline is kept so that if every
-    # candidate is refused the caller learns why the strongest one was refused,
-    # rather than a generic "nothing found".
+    # Best first, then walk down. When a specific time limit is requested,
+    # prioritize candidates matching that horizon or closest to it.
     first_decline: NoTradeReason | None = None
-    ranked = sorted(scored, key=lambda row: row[0], reverse=True)
+    if time_limit_minutes is not None:
+        target_hz = resolve_time_limit(f"{time_limit_minutes}m")
+        ranked = sorted(scored, key=lambda row: (row[2] == target_hz, row[0]), reverse=True)
+    else:
+        # For default sweep, balance heuristic score with shorter timeframes
+        ranked = sorted(scored, key=lambda row: row[0], reverse=True)
+
     for score, symbol, hz, _direction in ranked:
         try:
             rec = generate_trade_recommendation(
@@ -408,6 +424,7 @@ def generate_best_trade_recommendation(
                 time_limit=hz,
                 provider_name=provider_name,
                 candle_fetcher=candle_fetcher,
+                hold_minutes=time_limit_minutes,
             )
         except NoTradeReason as exc:
             if first_decline is None:

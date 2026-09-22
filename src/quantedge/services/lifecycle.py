@@ -50,6 +50,7 @@ def monitor_and_settle_active_signals(
     *,
     limit: int = 50,
     candle_fetcher: Any = None,
+    trigger_ai_postmortem: bool = False,
 ) -> dict[str, Any]:
     """Inspect all open signals, check TP/SL hits or expiry, settle and update memory.
 
@@ -99,18 +100,46 @@ def monitor_and_settle_active_signals(
         signal_id = decision.decision_id or "unknown"
         entry_time = decision.created_at_utc
 
-        # 1. Fetch candles covering the window
-        try:
-            if candle_fetcher is not None:
-                series = candle_fetcher(symbol, _DEFAULT_TIMEFRAME)
-            else:
-                series = registry.get_candles(symbol, _DEFAULT_TIMEFRAME, limit=_MAX_BARS)
-        except QuantEdgeError as exc:
-            log.warning(
-                "no candles available to monitor signal",
-                extra={"symbol": symbol, "signal_id": signal_id, "code": exc.code},
-            )
-            continue
+        # For non-crypto assets (forex, commodities, metals), use TradingView directly
+        is_crypto = symbol.endswith("USDT") or symbol.endswith("BUSD") or symbol in (
+            "BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT"
+        )
+        if not is_crypto:
+            try:
+                from quantedge.services.tradingview import get_tradingview_analysis
+
+                tv = get_tradingview_analysis(symbol, timeframe="1m")
+                cur_price = tv.get("price")
+                if cur_price:
+                    p_dec = Decimal(str(cur_price))
+                    now_ts = utc_now()
+
+                    class _LiveBar:
+                        def __init__(self, p: Decimal, ts: Any):
+                            self.open = p
+                            self.high = p
+                            self.low = p
+                            self.close = p
+                            self.is_closed = True
+                            self.close_time_utc = ts
+
+                    series = type("Series", (), {"candles": [_LiveBar(p_dec, now_ts)]})()
+                else:
+                    continue
+            except Exception as tv_err:
+                log.warning(
+                    "no candles available to monitor signal",
+                    extra={"symbol": symbol, "signal_id": signal_id, "error": str(tv_err)},
+                )
+                continue
+        else:
+            try:
+                if candle_fetcher is not None:
+                    series = candle_fetcher(symbol, _DEFAULT_TIMEFRAME)
+                else:
+                    series = registry.get_candles(symbol, _DEFAULT_TIMEFRAME, limit=_MAX_BARS)
+            except Exception as exc:
+                continue
 
         # Closed candles at or after entry time
         window = [
@@ -128,13 +157,14 @@ def monitor_and_settle_active_signals(
         # 2. Derive or estimate risk levels (Stop Loss and Take Profit)
         stop: Decimal | None = None
         target: Decimal | None = None
-        try:
-            levels = _risk_levels_for(symbol, horizon, direction, ref_price, candle_fetcher)
-            if levels is not None:
-                stop = levels.stop
-                target = levels.target
-        except Exception:
-            pass
+        if is_crypto:
+            try:
+                levels = _risk_levels_for(symbol, horizon, direction, ref_price, candle_fetcher)
+                if levels is not None:
+                    stop = levels.stop
+                    target = levels.target
+            except Exception:
+                pass
 
         # Fallback levels if ATR calculation failed
         if stop is None or target is None:
@@ -259,6 +289,7 @@ def monitor_and_settle_active_signals(
                         target=target,
                         holding_candles=window,
                         entry_time=entry_time,
+                        trigger_ai_postmortem=trigger_ai_postmortem,
                     )
                 except Exception as mem_exc:
                     log.warning(

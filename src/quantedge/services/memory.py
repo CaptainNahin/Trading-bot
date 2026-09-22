@@ -142,6 +142,7 @@ def record_trade_outcome_and_analyze(
     entry_features: object | None = None,
     exit_features: object | None = None,
     user_notes: str | None = None,
+    trigger_ai_postmortem: bool = True,
 ) -> TradeMemory:
     """Record a settled trade, diagnosing the cause first when it lost.
 
@@ -189,7 +190,7 @@ def record_trade_outcome_and_analyze(
             exit_features=exit_features,
         )
         # Augment with AI Brain post-mortem if an LLM reviewer is configured and loss was diagnosable
-        if mortem is not None:
+        if mortem is not None and trigger_ai_postmortem:
             try:
                 from quantedge.providers.llm import default_llm_provider
 

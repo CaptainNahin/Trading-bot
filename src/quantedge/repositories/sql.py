@@ -855,9 +855,8 @@ class SqlRepository:
                     symbol=llm_response.asset,
                     horizon=llm_response.horizon,
                     direction=llm_response.direction.value,
-                    status="CANDIDATE",
-                    llm_response=llm_response.model_dump(),
-                    context_snapshot=context.model_dump() if context else None,
+                    llm_response=llm_response.model_dump(mode="json") if hasattr(llm_response, "model_dump") else llm_response,
+                    context_snapshot=context.model_dump(mode="json") if context and hasattr(context, "model_dump") else None,
                     version="signal-1.0.0",
                 )
             )

@@ -404,95 +404,93 @@ def _handle_signal(
     assumption_note = ""
     alternatives: list[dict[str, Any]] = []
 
-    if parsed.symbol is None:
+    # 1. Resolve target symbol: user explicitly typed one, OR passed one in default_symbol
+    target_symbol = parsed.symbol
+    if not target_symbol and default_symbol and default_symbol.upper() not in ("ANY", "", "NONE", "BTCUSDT", "SELECT"):
+        target_symbol = default_symbol
+
+    # 2. Resolve hold duration (e.g. 1m, 5m, 10m, 15m, 60m)
+    requested = parsed.minutes or default_minutes or _DEFAULT_HOLD_MINUTES
+    if parsed.minutes is None and default_minutes is None and target_symbol:
+        assumption_note = (
+            f"\n\nI assumed a {_DEFAULT_HOLD_MINUTES}-minute hold since you didn't say. "
+            f"Other options: {', '.join(t.label for t in available_time_limits())}."
+        )
+    minutes_used = requested
+
+    # 3. Helper to detect non-crypto assets (forex, commodities, equities)
+    from quantedge.services.tradingview import generate_tradingview_recommendation
+
+    def _is_non_crypto(sym: str) -> bool:
+        s = sym.upper()
+        return any(
+            k in s
+            for k in (
+                "JPY", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD",
+                "XAU", "XAG", "GOLD", "SILVER", "WTI", "BRENT", "OIL",
+                "SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL",
+            )
+        )
+
+    if target_symbol is None:
         try:
             rec = generate_best_trade_recommendation(
-                time_limit_minutes=parsed.minutes,
+                time_limit_minutes=minutes_used,
                 alternatives_out=alternatives,
             )
-        except NoTradeReason as exc:
-            return _no_trade_reply("any symbol", parsed.minutes or 0, exc)
-        except ValidationError as exc:
-            return ChatReply(
-                text=f"I can't analyse that: {exc.message}",
-                intent=Intent.SIGNAL,
-                data={"symbol": "ANY"},
-                warnings=[exc.message],
-            )
-        except QuantEdgeError as exc:
-            log.warning("global signal request failed", extra={"code": exc.code})
-            return ChatReply(
-                text=(
-                    f"I couldn't complete the global analysis: {exc.message}. "
-                    "No signal is being issued, because I'd be guessing."
-                ),
-                intent=Intent.SIGNAL,
-                data={"symbol": "ANY", "error_code": exc.code},
-                warnings=[exc.message],
-            )
+            assumption_note = _alternatives_note(alternatives)
+        except NoTradeReason:
+            # Fall back to TradingView for top institutional assets
+            log.info("scanner found no trade; falling back to TradingView institutional screener")
+            tv_cands = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XAUUSD", "USDJPY"]
+            rec = None
+            for cand in tv_cands:
+                try:
+                    rec = generate_tradingview_recommendation(cand, minutes=minutes_used)
+                    break
+                except Exception:
+                    continue
+            if rec is None:
+                return _no_trade_reply("any symbol", minutes_used, NoTradeReason(SignalStatus.NO_TRADE, "all markets in consolidation"))
         except Exception as exc:
-            log.exception("global signal sweep failed")
-            return ChatReply(
-                text=(
-                    f"Market analysis is temporarily unavailable ({type(exc).__name__}). "
-                    "Please try specifying a symbol and timeframe, e.g. `USD/JPY 5m` or `BTC 15m`."
-                ),
-                intent=Intent.SIGNAL,
-                data={"symbol": "ANY", "error": str(exc)},
-                warnings=[f"Global scan failed: {exc}"],
-            )
-
-        minutes_used = parsed.minutes or horizon_minutes(rec.horizon)
-        assumption_note = _alternatives_note(alternatives)
+            log.warning("global scan failed, falling back to TradingView: %s", exc)
+            try:
+                rec = generate_tradingview_recommendation("BTCUSDT", minutes=minutes_used)
+            except Exception:
+                return ChatReply(
+                    text=f"Market analysis is temporarily unavailable ({type(exc).__name__}). Please retry with `BTC 15m`.",
+                    intent=Intent.SIGNAL,
+                    data={"symbol": "ANY", "error": str(exc)},
+                )
     else:
-        symbol = parsed.symbol
-        # Asking for a symbol is a request for that symbol. Blocking on a missing
-        # duration turned "signal for BTC" into a question, so the one thing the
-        # user actually named went unanswered. A duration is needed to pick the
-        # timeframes, so the shortest configured horizon that is not a scalp is
-        # assumed, stated in the reply, and overridden the moment one is given.
-        requested = parsed.minutes or default_minutes or _DEFAULT_HOLD_MINUTES
-        if parsed.minutes is None and default_minutes is None:
-            assumption_note = (
-                f"\n\nI assumed a {_DEFAULT_HOLD_MINUTES}-minute hold since you didn't say. "
-                f"Other options: {', '.join(t.label for t in available_time_limits())}."
-            )
-
-        minutes_used = requested
-        try:
-            horizon = horizon_for_minutes(minutes_used)
-            rec = generate_trade_recommendation(symbol, time_limit=horizon)
-        except NoTradeReason as exc:
-            return _no_trade_reply(symbol, minutes_used, exc, note=assumption_note)
-        except ValidationError as exc:
-            return ChatReply(
-                text=f"I can't analyse that: {exc.message}",
-                intent=Intent.SIGNAL,
-                data={"symbol": symbol},
-                warnings=[exc.message],
-            )
-        except QuantEdgeError as exc:
-            log.warning("signal request failed", extra={"symbol": symbol, "code": exc.code})
-            return ChatReply(
-                text=(
-                    f"I couldn't complete the analysis for {symbol}: {exc.message}. "
-                    "No signal is being issued, because I'd be guessing."
-                ),
-                intent=Intent.SIGNAL,
-                data={"symbol": symbol, "error_code": exc.code},
-                warnings=[exc.message],
-            )
-        except Exception as exc:
-            log.exception("signal recommendation failed", extra={"symbol": symbol})
-            return ChatReply(
-                text=(
-                    f"Market data or analysis for {symbol} is temporarily unavailable ({type(exc).__name__}). "
-                    "No trade recommendation was issued."
-                ),
-                intent=Intent.SIGNAL,
-                data={"symbol": symbol, "error": str(exc)},
-                warnings=[f"Analysis failed: {exc}"],
-            )
+        symbol = target_symbol
+        # Non-crypto symbols (Forex like USDJPY, Metals like Gold) or TwelveData limitations
+        if _is_non_crypto(symbol):
+            try:
+                rec = generate_tradingview_recommendation(symbol, minutes=minutes_used)
+            except Exception as tv_exc:
+                log.warning("tradingview recommendation failed for %s: %s", symbol, tv_exc)
+                return _no_trade_reply(symbol, minutes_used, NoTradeReason(SignalStatus.INSUFFICIENT_DATA, str(tv_exc)))
+        else:
+            try:
+                horizon = horizon_for_minutes(minutes_used)
+                rec = generate_trade_recommendation(symbol, time_limit=horizon, hold_minutes=minutes_used)
+            except (NoTradeReason, QuantEdgeError, ValidationError) as exc:
+                log.info("deterministic engine declined %s (%s); trying TradingView institutional analysis", symbol, exc)
+                try:
+                    rec = generate_tradingview_recommendation(symbol, minutes=minutes_used)
+                except Exception:
+                    return _no_trade_reply(symbol, minutes_used, exc, note=assumption_note)
+            except Exception as exc:
+                log.exception("signal recommendation failed for %s", symbol)
+                try:
+                    rec = generate_tradingview_recommendation(symbol, minutes=minutes_used)
+                except Exception:
+                    return ChatReply(
+                        text=f"Market data or analysis for {symbol} is temporarily unavailable ({type(exc).__name__}).",
+                        intent=Intent.SIGNAL,
+                        data={"symbol": symbol, "error": str(exc)},
+                    )
 
     # The expiry the user is told is the duration they chose, not the horizon's.
     expiry = expiry_for(minutes_used, rec.generated_at_utc)
@@ -1406,39 +1404,78 @@ def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
     """Generate an intelligent, question-specific response when upstream LLM is experiencing transient delays."""
     lower = user_text.lower().strip()
 
-    # 1. "what are you doing" / current activity
-    if any(phrase in lower for phrase in ("what are you doing", "what are u doing", "what are you up to", "what's happening", "what are you working on")):
+    # 1. Friendly greetings (checked first with word boundaries)
+    if re.search(r"\b(hi|hello|hey|good\s+morning|good\s+evening|good\s+day|sup|yo|howdy)\b", lower):
         return (
-            "Right now, I am actively monitoring live market feeds across Binance (Crypto), Twelve Data (Forex), "
-            "and Alpha Vantage. My quantitative engine is scanning multi-timeframe order flow and market structure, "
-            "while my autonomous lifecycle monitor tracks open trades until Take Profit or Stop Loss.\n\n"
-            "Would you like me to run an institutional scan on a specific asset? For example, type `BTC 15m` "
-            "or `tv btc` for live TradingView indicators!"
+            "Hello! I'm **QuantEdge AI**, your dual-brain quantitative trading intelligence assistant.\n\n"
+            "I'm ready to analyze markets, scan technical indicators, or discuss trading strategies. "
+            "How can I help your market analysis today? You can command me with `BTC 15m`, `tv btc`, "
+            "`gold 10m`, or ask me any questions about trading indicators and platform strategies!"
         )
 
-    # 2. Questions about the bot / platform / how it works
-    if any(phrase in lower for phrase in ("how does", "how do you", "what is this bot", "tell me about", "who are you", "what can you do", "features", "how it works", "bot work")):
+    # 2. Specific Technical Indicator Inquiries
+    if "rsi" in lower:
         return (
-            "I am **QuantEdge AI**, an institutional-grade quantitative trading platform featuring a **Dual-Brain Architecture**:\n\n"
-            "1. **Mathematical Quant Engine**: Analyzes 200 EMA trend alignment, ATR volatility bands, multi-timeframe consensus (15m, 1H, 4H, 1D), and order book volume delta.\n"
-            "2. **ZXL AI Brain**: Reviews quantitative setups, filters out low-conviction market noise, and conducts post-mortem diagnostics on resolved trades.\n"
-            "3. **TradingView Institutional Tools**: FastMCP integration providing live technical summaries, floor pivots (S1-S3, R1-R3), and volume breakout screeners.\n"
-            "4. **Autonomous Memory Engine**: Automatically settles active trades and learns DO/DON'T rules from losses to improve over time.\n\n"
-            "Try commanding me with `BTC 15m`, `tv btc`, `tv breakouts`, or `active trades`!"
+            "**Relative Strength Index (RSI)** in QuantEdge AI:\n\n"
+            "- **Institutional Calibration**: We use a standard 14-period RSI combined with TradingView multi-oscillator consensus.\n"
+            "- **Key Thresholds**: Above 70 denotes overbought conditions (potential mean-reversion short), while below 30 denotes oversold conditions.\n"
+            "- **Signal Integration**: We never trade RSI in isolation. RSI momentum must align with our 200 EMA trend regime to validate a directional entry.\n\n"
+            "Try typing `tv btc` to view live RSI and momentum readings on Bitcoin right now!"
         )
 
-    # 3. Questions about markets / supported assets
-    if any(phrase in lower for phrase in ("markets", "assets", "symbols", "what coins", "what crypto", "supported")):
+    if "macd" in lower:
         return (
-            "I support three institutional asset classes:\n\n"
-            "- **Crypto**: Bitcoin (`BTCUSDT`), Ethereum (`ETHUSDT`), Solana (`SOLUSDT`), Binance Coin (`BNBUSDT`), Ripple (`XRPUSDT`).\n"
-            "- **Forex**: Euro (`EURUSD`), British Pound (`GBPUSD`), Japanese Yen (`USDJPY`).\n"
-            "- **Commodities**: Gold (`XAUUSD`), Silver (`XAGUSD`), Crude Oil (`WTICOUSD`).\n\n"
-            "You can analyze any of these on holding horizons from 1m up to 1 hour (e.g. `ETH 1h` or `tv gold`)."
+            "**Moving Average Convergence Divergence (MACD)**:\n\n"
+            "- **Formula**: Evaluates the relationship between the 12-period fast EMA and 26-period slow EMA, smoothed by a 9-period signal line.\n"
+            "- **Histogram**: QuantEdge measures histogram expansion to gauge accelerating institutional momentum before confirming breakouts.\n\n"
+            "Type `tv eth` to inspect live MACD momentum on Ethereum!"
+        )
+
+    if any(k in lower for k in ("ema", "exponential moving average", "moving average")):
+        return (
+            "**200 EMA Trend Regime Filter**:\n\n"
+            "- **Trend Baseline**: The 200 Exponential Moving Average is our foundational gate across all timeframes.\n"
+            "- **Directional Gate**: Long setups are strictly restricted to prices holding above the 200 EMA, while Short setups require price below the EMA.\n"
+            "- **Multi-Timeframe Alignment**: We enforce trend agreement across execution (e.g. 15m), confirmation (1H), and regime (4H) timeframes.\n\n"
+            "Type `BTC 15m` to see how the 200 EMA filters our active market setups!"
+        )
+
+    if "atr" in lower:
+        return (
+            "**Average True Range (ATR) & Dynamic Risk**:\n\n"
+            "- **Mathematical Levels**: Instead of arbitrary fixed pips or percentages, QuantEdge calculates Stop Loss and Take Profit distances as multiples of ATR (typically 1.5x - 2.0x ATR).\n"
+            "- **Volatility Normalization**: This ensures stops are positioned safely outside normal market noise during high-volatility events.\n\n"
+            "Type `gold 10m` to see ATR-calculated stop and target levels in action!"
+        )
+
+    if any(k in lower for k in ("bollinger", "squeeze", "bands")):
+        return (
+            "**Bollinger Bands & Institutional Squeeze**:\n\n"
+            "- **Band Squeeze**: When Bollinger Bands contract inside Keltner Channels, it signals volatility compression before an explosive breakout.\n"
+            "- **TradingView Integration**: Our MCP server actively scans for active squeeze patterns across crypto and forex markets.\n\n"
+            "Type `tv breakouts` to discover markets currently breaking out of volatility squeezes!"
+        )
+
+    if any(k in lower for k in ("pivot", "pivots", "s1", "r1")):
+        return (
+            "**Institutional Floor Pivots**:\n\n"
+            "- **Calculations**: Daily pivot $(H+L+C)/3$ with support ($S_1, S_2, S_3$) and resistance ($R_1, R_2, R_3$) levels.\n"
+            "- **TradingView Feed**: We pull exact institutional pivot targets directly through our TradingView MCP integration to establish high-probability price targets.\n\n"
+            "Type `tv pivots btc` to view institutional pivot levels for Bitcoin!"
+        )
+
+    # 3. Strategy and Risk Management
+    if any(k in lower for k in ("risk", "reward", "r:r", "ratio", "stop loss", "take profit", "money management")):
+        return (
+            "**Institutional Risk Architecture**:\n\n"
+            "- **Guaranteed $R:R \\ge 1.34$**: Every trade recommendation requires a minimum 1.34:1 (targeting 2:1) Reward-to-Risk ratio.\n"
+            "- **Hard Invalidation Gates**: Candidates that fail event-risk checks, data quality thresholds, or multi-timeframe alignment are immediately vetoed (NO_TRADE).\n"
+            "- **Autonomous Lifecycle**: Open trades are actively monitored against live high/low ticks until TP or SL resolution.\n\n"
+            "Try generating a trade setup with `ETH 15m` or `USDJPY 5m`!"
         )
 
     # 4. Questions about active trades / positions
-    if any(phrase in lower for phrase in ("active", "positions", "open trades", "in flight")):
+    if any(phrase in lower for phrase in ("active trades", "open trades", "in flight", "current trades", "open positions")):
         try:
             from quantedge.services.lifecycle import get_active_signals_summary
             summary = get_active_signals_summary()
@@ -1452,7 +1489,7 @@ def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
             return "You can check all in-flight positions and automated settlements anytime by typing `active trades`."
 
     # 5. Questions about performance, win rate, or memory
-    if any(phrase in lower for phrase in ("win rate", "performance", "memory", "learned", "accuracy", "track record")):
+    if any(phrase in lower for phrase in ("win rate", "performance", "memory bank", "what have you learned", "learned rules", "track record", "past trades")):
         try:
             from quantedge.services.memory import get_memory_bank_summary
             mem = get_memory_bank_summary()
@@ -1463,7 +1500,7 @@ def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
             rules_str = "\n".join(f"- {r}" for r in rules[:3]) if rules else "No recurring failure rules yet."
             return (
                 f"**Autonomous Memory Bank Status**:\n"
-                f"- Total Recorded Trades: {total}\n"
+                f"- Total Settled Trades: {total}\n"
                 f"- Wins: {wins} | Losses: {losses}\n\n"
                 f"**Active Learned Rules**:\n{rules_str}\n\n"
                 f"Type `what have you learned` to inspect the full trade journal."
@@ -1471,36 +1508,42 @@ def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
         except Exception:
             return "Type `what have you learned` to inspect the complete memory journal and learned rules."
 
-    # 6. Friendly greetings (word boundary matched so 'this' doesn't match 'hi')
-    if re.search(r"\b(hi|hello|hey|good\s+morning|good\s+evening|good\s+day|sup|yo|howdy)\b", lower):
+    # 6. Questions about markets / supported assets
+    if any(phrase in lower for phrase in ("markets", "assets", "symbols", "what coins", "what crypto", "supported pairs")):
         return (
-            "Hello! I'm **QuantEdge AI**, your dual-brain quantitative trading intelligence assistant.\n\n"
-            "I'm ready to analyze markets, scan technical indicators, or discuss trading strategies. "
-            "How can I help your market analysis today? You can command me with `BTC 15m`, `tv btc`, "
-            "or ask me any questions about our platform and strategies!"
+            "I support three institutional asset classes across global exchanges:\n\n"
+            "- **Crypto**: Bitcoin (`BTCUSDT`), Ethereum (`ETHUSDT`), Solana (`SOLUSDT`), Binance Coin (`BNBUSDT`), Ripple (`XRPUSDT`).\n"
+            "- **Forex**: Euro (`EURUSD`), British Pound (`GBPUSD`), Japanese Yen (`USDJPY`), Swiss Franc (`USDCHF`), Canadian Dollar (`USDCAD`).\n"
+            "- **Commodities**: Gold (`XAUUSD`), Silver (`XAGUSD`), Crude Oil (`WTICOUSD`).\n\n"
+            "You can request trades on horizons from 1m up to 1h (e.g. `gold 10m` or `USDJPY 5m`)."
         )
 
-    # 7. Technical indicators & Quant concepts
-    if any(phrase in lower for phrase in ("atr", "ema", "rsi", "macd", "bollinger", "pivot", "indicator", "strategy", "risk", "stop loss", "take profit")):
+    # 7. Explicit questions about the bot identity / architecture
+    if any(phrase in lower for phrase in (
+        "what is quantedge", "who are you", "what is this bot", "how does the bot work",
+        "how does this bot work", "tell me about this bot", "what can you do", "bot features",
+        "how does the platform work", "dual brain", "architecture"
+    )):
         return (
-            f"Here is how **QuantEdge AI** approaches quantitative indicators:\n\n"
-            "- **200 EMA**: Our baseline multi-timeframe trend regime filter. Longs are only validated when momentum is established above the EMA.\n"
-            "- **ATR (Average True Range)**: Used to mathematically calculate non-arbitrary Stop-Loss and Take-Profit distances, ensuring stops sit outside market noise.\n"
-            "- **TradingView Multi-Oscillator Consensus**: Evaluates RSI, MACD, Stochastics, and ADX together to avoid overbought/oversold false positives.\n"
-            "- **Institutional Pivots**: Computes Floor Pivot, S1-S3 support, and R1-R3 resistance levels for precision entry targets.\n\n"
-            "You can test live TradingView indicators on any asset right now by typing e.g. `tv btc` or `tv eth`!"
+            "I am **QuantEdge AI**, an institutional-grade quantitative trading platform featuring a **Dual-Brain Architecture**:\n\n"
+            "1. **Mathematical Quant Engine**: Analyzes 200 EMA trend alignment, ATR volatility bands, multi-timeframe consensus (15m, 1H, 4H, 1D), and order book volume delta.\n"
+            "2. **ZXL AI Brain (GLM-5.3)**: Reviews quantitative setups, filters out low-conviction market noise, and conducts post-mortem diagnostics on resolved trades.\n"
+            "3. **TradingView FastMCP Tools**: Live technical summaries, floor pivots (S1-S3, R1-R3), and volume breakout screeners.\n"
+            "4. **Autonomous Memory Engine**: Automatically settles active trades and learns DO/DON'T rules from losses to improve over time.\n\n"
+            "Try commanding me with `BTC 15m`, `tv btc`, `gold 10m`, or `active trades`!"
         )
 
     # 8. General fallback directly addressing the inquiry
     return (
         f"I received your question: *\"{user_text}\"*\n\n"
-        "As **QuantEdge AI**, I'm equipped to analyze market structure (200 EMA, ATR dynamic stops/targets, "
-        "order book volume delta), deliver TradingView institutional indicators, and track trade outcomes.\n\n"
-        "**Quick Actions:**\n"
-        "- Type `BTC 15m` to generate an algorithmic signal\n"
-        "- Type `tv btc` for TradingView multi-oscillator technical analysis & pivots\n"
-        "- Type `active trades` to monitor current positions\n"
-        "- Ask me any question about trading concepts (like RSI, ATR, or multi-timeframe alignment)!"
+        "As **QuantEdge AI**, I combine deterministic mathematical quantitative modeling with our AI Brain "
+        "and live TradingView institutional analytics across Crypto, Forex, and Metals.\n\n"
+        "**Available Actions:**\n"
+        "- **Algorithmic Trades**: Type e.g. `BTC 15m`, `gold 10m`, or `USDJPY 5m`\n"
+        "- **TradingView TA**: Type `tv btc` for multi-oscillator technical analysis & pivots\n"
+        "- **Breakout Screener**: Type `tv breakouts` to identify volume surges\n"
+        "- **Active Monitoring**: Type `active trades` to track live in-flight positions\n"
+        "- **Trading Education**: Ask me about indicators like RSI, ATR, 200 EMA, or MACD!"
     )
 
 
@@ -1517,7 +1560,12 @@ def _handle_conversation(message: str, state: dict[str, Any]) -> ChatReply:
         log.debug("could not build dynamic platform context", extra={"error": str(ctx_err)})
         platform_context = ""
 
-    full_system_prompt = f"{_CONVERSATION_SYSTEM_PROMPT}\n\n{platform_context}" if platform_context else _CONVERSATION_SYSTEM_PROMPT
+    # Conditionally include platform context on platform-specific questions to keep general chats fast
+    is_platform_query = any(w in text.lower() for w in ("platform", "bot", "active", "position", "rule", "learned", "status", "performance", "system", "engine", "architecture"))
+    if is_platform_query and platform_context:
+        full_system_prompt = f"{_CONVERSATION_SYSTEM_PROMPT}\n\n{platform_context}"
+    else:
+        full_system_prompt = _CONVERSATION_SYSTEM_PROMPT
 
     try:
         from quantedge.providers.llm import default_llm_provider

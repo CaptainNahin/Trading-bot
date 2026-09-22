@@ -47,8 +47,8 @@ __all__ = ["SeekAILLMProvider"]
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://seekai.cc/v1"
-_DEFAULT_MODEL = "deepseek-v4-flash"
-_DEFAULT_FALLBACK_MODEL = "glm-5.3"
+_DEFAULT_MODEL = "glm-5.3-flash"
+_DEFAULT_FALLBACK_MODEL = "deepseek-v4.1-flash"
 _TIMEOUT_SECONDS = 25.0
 _TEMPERATURE = 0.2
 _MAX_TOKENS = 4096
@@ -88,7 +88,7 @@ class SeekAILLMProvider(BaseLLMProvider):
         raw_url = base_url or settings.seekai_base_url or _DEFAULT_BASE_URL
         self._base_url = _normalise_base_url(raw_url)
         raw_timeout = float(settings.llm_timeout_seconds or _TIMEOUT_SECONDS)
-        self._timeout = min(raw_timeout, 15.0)
+        self._timeout = min(raw_timeout, 25.0)
 
     @property
     def base_url(self) -> str:
@@ -110,10 +110,9 @@ class SeekAILLMProvider(BaseLLMProvider):
         }
 
     def health(self) -> ProviderHealth:
-        """Probe Seek AI with a minimal request.
+        """Probe Seek AI via the /models endpoint without consuming chat quota.
 
-        Tests primary model first. If a 403 quota error occurs, probes the fallback
-        model to verify whether the key and account are functional.
+        Verifies API key validity and confirms configured models are available.
         """
         if not self._api_key:
             return ProviderHealth(
@@ -126,51 +125,53 @@ class SeekAILLMProvider(BaseLLMProvider):
                 message="SEEKAI_API_KEY is not configured; reviews are skipped",
             )
 
-        endpoint = f"{self._base_url}/chat/completions"
-        probe_models = [self.model_name]
-        if self._fallback_model != self.model_name:
-            probe_models.append(self._fallback_model)
+        endpoint = f"{self._base_url}/models"
+        try:
+            with httpx.Client(timeout=8.0) as client:
+                resp = client.get(endpoint, headers=self._headers())
 
-        last_error: str | None = None
-        for probe_model in probe_models:
-            body = {
-                "model": probe_model,
-                "messages": [{"role": "user", "content": "ping"}],
-                "max_tokens": _HEALTH_MAX_TOKENS,
-                "temperature": 0.0,
-            }
-            try:
-                with httpx.Client(timeout=15.0) as client:
-                    resp = client.post(endpoint, headers=self._headers(), json=body)
-                if resp.status_code == httpx.codes.OK:
-                    SeekAILLMProvider._ACTIVE_MODEL = probe_model
-                    active_note = (
-                        f"model {probe_model} answering"
-                        if probe_model == self.model_name
-                        else f"primary model {self.model_name} quota limited; active fallback: {probe_model}"
-                    )
-                    return ProviderHealth(
-                        provider=self.provider_name,
-                        kind="llm",
-                        status=HealthStatus.OK,
-                        enabled=True,
-                        credentials_present=True,
-                        message=f"{self._base_url} reachable, {active_note}",
-                    )
-                if resp.status_code == httpx.codes.UNAUTHORIZED:
-                    return ProviderHealth(
-                        provider=self.provider_name,
-                        kind="llm",
-                        status=HealthStatus.ERROR,
-                        enabled=True,
-                        credentials_present=True,
-                        message=f"SEEKAI_API_KEY rejected by {self._base_url} (HTTP 401)",
-                    )
-                last_error = f"HTTP {resp.status_code}: {resp.text[:120]}"
-            except httpx.TimeoutException:
-                last_error = "connection timed out after 15.0s"
-            except httpx.HTTPError as exc:
-                last_error = f"{type(exc).__name__}: {exc}"
+            if resp.status_code == httpx.codes.OK:
+                data = resp.json().get("data", [])
+                available_ids = {m.get("id") for m in data if isinstance(m, dict)}
+                if self.model_name in available_ids:
+                    SeekAILLMProvider._ACTIVE_MODEL = self.model_name
+                    msg = f"{self._base_url} reachable, model {self.model_name} ready"
+                elif self._fallback_model in available_ids:
+                    SeekAILLMProvider._ACTIVE_MODEL = self._fallback_model
+                    msg = f"{self._base_url} reachable, fallback {self._fallback_model} ready"
+                else:
+                    msg = f"{self._base_url} reachable ({len(available_ids)} models available)"
+                return ProviderHealth(
+                    provider=self.provider_name,
+                    kind="llm",
+                    status=HealthStatus.OK,
+                    enabled=True,
+                    credentials_present=True,
+                    message=msg,
+                )
+            if resp.status_code == httpx.codes.TOO_MANY_REQUESTS:
+                return ProviderHealth(
+                    provider=self.provider_name,
+                    kind="llm",
+                    status=HealthStatus.OK,
+                    enabled=True,
+                    credentials_present=True,
+                    message=f"{self._base_url} reachable (rate-limit window active)",
+                )
+            if resp.status_code == httpx.codes.UNAUTHORIZED:
+                return ProviderHealth(
+                    provider=self.provider_name,
+                    kind="llm",
+                    status=HealthStatus.ERROR,
+                    enabled=True,
+                    credentials_present=True,
+                    message=f"SEEKAI_API_KEY rejected by {self._base_url} (HTTP 401)",
+                )
+            last_error = f"HTTP {resp.status_code}: {resp.text[:120]}"
+        except httpx.TimeoutException:
+            last_error = "connection timed out after 8.0s"
+        except httpx.HTTPError as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
 
         return ProviderHealth(
             provider=self.provider_name,
@@ -178,7 +179,7 @@ class SeekAILLMProvider(BaseLLMProvider):
             status=HealthStatus.ERROR,
             enabled=True,
             credentials_present=True,
-            message=f"{self._base_url} health check failed ({last_error or 'unreachable'})",
+            message=f"{self._base_url} health check failed ({last_error})",
         )
 
     def evaluate_signal_context(self, context: SignalContext) -> LLMSignalResponse:
@@ -332,7 +333,7 @@ class SeekAILLMProvider(BaseLLMProvider):
 
         return self._call_model(
             messages=messages,
-            max_tokens=_MAX_TOKENS,
+            max_tokens=2048,
             temperature=0.6,
             timeout=min(self._timeout, 12.0),
         )
@@ -349,13 +350,17 @@ class SeekAILLMProvider(BaseLLMProvider):
         endpoint = f"{self._base_url}/chat/completions"
         active_candidate = SeekAILLMProvider._ACTIVE_MODEL or self.model_name
         models_to_try: list[str] = [active_candidate]
-        for cand in (self._fallback_model, "deepseek-v4-flash", "glm-5.3"):
+        for cand in ("glm-5.3-flash", "deepseek-v4.1-flash", "claude-sonnet-4-6", "claude-sonnet"):
             if cand and cand not in models_to_try:
                 models_to_try.append(cand)
-        # Bounded candidates: at most 2 real models
-        models_to_try = models_to_try[:2]
-
+        # Bounded candidates: at most 3 real models
         effective_budget = timeout or self._timeout
+        # When budget is tight (<= 12s), give the entire budget to the primary model
+        if effective_budget <= 12.0:
+            models_to_try = [active_candidate]
+        else:
+            models_to_try = models_to_try[:2]
+
         last_exc: Exception | None = None
         for idx, model_name in enumerate(models_to_try):
             has_next = idx < len(models_to_try) - 1
@@ -385,13 +390,21 @@ class SeekAILLMProvider(BaseLLMProvider):
                     f"{self._base_url} unreachable: {type(exc).__name__}",
                 ) from exc
 
+            # Immediate rate limit exit: SeekAI limits the whole account (5 req/min) so retrying other models burns quota
+            if response.status_code == httpx.codes.TOO_MANY_REQUESTS:
+                from quantedge.errors import ProviderRateLimitError
+
+                raise ProviderRateLimitError(
+                    self.provider_name,
+                    "Seek AI 1-minute rate limit active (max 5 req/min)",
+                )
+
             # If model is unauthorized (token lacks model access), forbidden (SVIP), not found, bad request, or gateway error, failover!
             if has_next and response.status_code in (
                 httpx.codes.UNAUTHORIZED,
                 httpx.codes.FORBIDDEN,
                 httpx.codes.NOT_FOUND,
                 httpx.codes.BAD_REQUEST,
-                httpx.codes.TOO_MANY_REQUESTS,
                 httpx.codes.GATEWAY_TIMEOUT,
                 httpx.codes.BAD_GATEWAY,
                 httpx.codes.SERVICE_UNAVAILABLE,
@@ -434,8 +447,22 @@ class SeekAILLMProvider(BaseLLMProvider):
                     )
                 message = choices[0].get("message") or {}
                 content_val = (message.get("content") or "").strip()
-                reasoning_val = (message.get("reasoning_content") or "").strip()
-                text = content_val if content_val else reasoning_val
+                reasoning_val = (
+                    message.get("reasoning")
+                    or message.get("reasoning_content")
+                    or message.get("thought")
+                    or ""
+                ).strip()
+
+                import re
+                cleaned_content = re.sub(r"<think>.*?</think>", "", content_val, flags=re.DOTALL).strip()
+                if not cleaned_content and "<think>" in content_val:
+                    if "</think>" in content_val:
+                        cleaned_content = content_val.split("</think>")[-1].strip()
+                    else:
+                        cleaned_content = re.sub(r"</?think>", "", content_val).strip()
+
+                text = cleaned_content if cleaned_content else (content_val if content_val else reasoning_val)
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise ProviderBadResponseError(
                     self.provider_name,

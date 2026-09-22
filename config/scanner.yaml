@@ -14,7 +14,7 @@ horizons:
   "1m":  { execution: "1m",  confirmation: "5m",  regime: "15m", lookback: 300 }
   "3m":  { execution: "3m",  confirmation: "15m", regime: "1h",  lookback: 300 }
   "5m":  { execution: "5m",  confirmation: "15m", regime: "1h",  lookback: 300 }
-  "10m": { execution: "10m", confirmation: "30m", regime: "4h",  lookback: 300 }
+  "10m": { execution: "10m", confirmation: "15m", regime: "1h",  lookback: 300 }
   "15m": { execution: "15m", confirmation: "1h",  regime: "4h",  lookback: 300 }
   "30m": { execution: "30m", confirmation: "4h",  regime: "1d",  lookback: 300 }
   "1h":  { execution: "1h",  confirmation: "4h",  regime: "1d",  lookback: 300 }

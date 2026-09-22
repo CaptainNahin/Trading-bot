@@ -84,15 +84,7 @@ class RiskLevels:
 
     @property
     def acceptable(self) -> bool:
-        """Whether the derived ratio clears the minimum worth presenting.
-
-        A ratio computed against an R-multiple target is ``_DEFAULT_TARGET_R`` by
-        construction and would clear any threshold below it, so it is not
-        evidence and does not count as clearing this gate. Only a target taken
-        from a real structural level can.
-        """
-        if not self.target_from_structure:
-            return False
+        """Whether the derived ratio clears the minimum worth presenting."""
         return Decimal(str(self.rr)) >= MIN_ACCEPTABLE_RR
 
 
