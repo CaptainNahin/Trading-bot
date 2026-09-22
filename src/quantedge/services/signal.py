@@ -195,24 +195,47 @@ def generate_trade_recommendation(
     resolved to a configured horizon so the analysis timeframes and the stated
     expiry agree with each other.
     """
+    from quantedge.services.horizons import horizon_minutes
     from quantedge.services.memory import get_relevant_memories, recurring_loss_rules
+    from quantedge.services.tradingview import generate_tradingview_recommendation
 
     horizon = resolve_time_limit(time_limit)
-    decision = generate_signal_decision(
-        symbol,
-        horizon=horizon,
-        provider_name=provider_name,
-        candle_fetcher=candle_fetcher,
+    dur = hold_minutes if hold_minutes is not None else horizon_minutes(horizon)
+
+    # Universal market routing: non-crypto or non-Binance pairs execute directly via TradingView MCP
+    clean = symbol.upper().replace("/", "").replace("-", "")
+    is_binance_native = (
+        clean.endswith("USDT")
+        and any(clean.startswith(c) for c in ("BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK", "MATIC", "POL", "LTC", "NEAR", "SUI", "PEPE", "SHIB", "TRX"))
     )
 
+    if not is_binance_native:
+        try:
+            return generate_tradingview_recommendation(symbol, minutes=dur)
+        except Exception as tv_exc:
+            log.warning("TradingView direct recommendation failed for %s: %s", symbol, tv_exc)
+
+    try:
+        decision = generate_signal_decision(
+            symbol,
+            horizon=horizon,
+            provider_name=provider_name,
+            candle_fetcher=candle_fetcher,
+        )
+    except Exception as exc:
+        log.info("deterministic engine declined %s (%s); trying TradingView institutional analysis", symbol, exc)
+        try:
+            return generate_tradingview_recommendation(symbol, minutes=dur)
+        except Exception:
+            raise
+
     if decision.status is not SignalStatus.SIGNAL or decision.direction is None:
+        try:
+            return generate_tradingview_recommendation(symbol, minutes=dur)
+        except Exception:
+            pass
+
         # Which list holds the reason depends on why the decision came back.
-        # INSUFFICIENT_DATA means something was missing, so missing_information
-        # names the cause. NO_TRADE means the evidence was read and found
-        # wanting, and the cause is the contradiction that decided it -- taking
-        # missing_information[0] in that case led with an unrelated data gap
-        # ("Liquidity session state not available") while the reasons that
-        # actually declined the trade were pushed into the detail line.
         if decision.status is SignalStatus.INSUFFICIENT_DATA:
             reasons = list(decision.missing_information)
         else:
@@ -225,10 +248,13 @@ def generate_trade_recommendation(
             detail="; ".join(reasons[1:4]),
         )
     if decision.reference_price is None:
-        raise NoTradeReason(
-            SignalStatus.INSUFFICIENT_DATA,
-            "no reference price was available from any provider",
-        )
+        try:
+            return generate_tradingview_recommendation(symbol, minutes=dur)
+        except Exception:
+            raise NoTradeReason(
+                SignalStatus.INSUFFICIENT_DATA,
+                "no reference price was available from any provider",
+            )
 
     levels = _risk_levels_for(
         symbol, horizon, decision.direction, decision.reference_price, candle_fetcher

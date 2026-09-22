@@ -219,6 +219,68 @@ _SYMBOL_ALIASES: dict[str, str] = {
 _SIGNAL_ID = re.compile(r"\b((?:rec|mem|sig)-[0-9a-f]{6,})\b", re.IGNORECASE)
 
 
+_ASSET_NAME_MAPPINGS: dict[str, str] = {
+    "ARGENTINE PESO": "USDARS",
+    "ARGENTINE": "USDARS",
+    "ARGENTINA": "USDARS",
+    "PESO": "USDARS",
+    "TURKISH LIRA": "USDTRY",
+    "LIRA": "USDTRY",
+    "BRAZILIAN REAL": "USDBRL",
+    "REAL": "USDBRL",
+    "MEXICAN PESO": "USDMXN",
+    "INDIAN RUPEE": "USDINR",
+    "RUPEE": "USDINR",
+    "SOUTH AFRICAN RAND": "USDZAR",
+    "RAND": "USDZAR",
+    "JAPANESE YEN": "USDJPY",
+    "YEN": "USDJPY",
+    "EURO": "EURUSD",
+    "BRITISH POUND": "GBPUSD",
+    "POUND": "GBPUSD",
+    "STERLING": "GBPUSD",
+    "SWISS FRANC": "USDCHF",
+    "FRANC": "USDCHF",
+    "CANADIAN DOLLAR": "USDCAD",
+    "LOONIE": "USDCAD",
+    "AUSTRALIAN DOLLAR": "AUDUSD",
+    "AUSSIE": "AUDUSD",
+    "NEW ZEALAND DOLLAR": "NZDUSD",
+    "KIWI": "NZDUSD",
+    "GOLD": "XAUUSD",
+    "SILVER": "XAGUSD",
+    "CRUDE OIL": "USOIL",
+    "CRUDE": "USOIL",
+    "OIL": "USOIL",
+    "BRENT": "UKOIL",
+    "NATURAL GAS": "NATGAS",
+    "COPPER": "COPPER",
+    "BITCOIN": "BTCUSDT",
+    "ETHEREUM": "ETHUSDT",
+    "SOLANA": "SOLUSDT",
+    "RIPPLE": "XRPUSDT",
+    "DOGECOIN": "DOGEUSDT",
+    "DOGE": "DOGEUSDT",
+    "CARDANO": "ADAUSDT",
+    "BINANCE COIN": "BNBUSDT",
+    "APPLE": "AAPL",
+    "NVIDIA": "NVDA",
+    "TESLA": "TSLA",
+    "MICROSOFT": "MSFT",
+    "AMAZON": "AMZN",
+    "GOOGLE": "GOOGL",
+    "ALPHABET": "GOOGL",
+    "META": "META",
+    "FACEBOOK": "META",
+    "S&P 500": "SPX",
+    "S&P": "SPX",
+    "SP500": "SPX",
+    "NASDAQ": "NDX",
+    "DOW JONES": "DJI",
+    "DOW": "DJI",
+}
+
+
 def parse_intent(message: str) -> ChatIntent:
     """Classify a message and extract its parameters, in code.
 
@@ -267,25 +329,41 @@ def parse_intent(message: str) -> ChatIntent:
         return ChatIntent(Intent.TRADINGVIEW, symbol=symbol, minutes=minutes, notes=text)
     if _LIFECYCLE_WORDS.search(text):
         return ChatIntent(Intent.LIFECYCLE, symbol=symbol)
+
+    # Exclude feedback/questions about problems from being mistaken for a signal request
+    is_meta_question = bool(re.search(r"\b(can'?t|cannot|why|how\s+come|problem|issue|bug|not\s+working|failed\s+to|what\s+markets?|explain|difference)\b", text, re.I))
+    is_explicit_signal_command = bool(re.search(r"\b(give\s+me|send\s+me|generate|scan\s+for|issue|recommend|signal|trade\s+setup)\b", text, re.I))
+
+    if is_meta_question and not is_explicit_signal_command:
+        return ChatIntent(Intent.CONVERSATION, symbol=symbol, minutes=minutes, notes=text)
+
     if _SIGNAL_WORDS.search(text) or (symbol is not None and minutes is not None):
         return ChatIntent(Intent.SIGNAL, symbol=symbol, minutes=minutes)
     if _HELP_WORDS.search(text):
         return ChatIntent(Intent.HELP)
     # A bare symbol is a request about that symbol; anything else is unknown.
-    if symbol is not None:
+    if symbol is not None and not is_meta_question:
         return ChatIntent(Intent.SIGNAL, symbol=symbol, minutes=minutes)
     return ChatIntent(Intent.UNKNOWN)
 
 
-def _extract_symbol(text: str) -> str | None:
-    """The first supported symbol named in the message.
+def _extract_symbol(text: str, default: str | None = None, default_symbol: str | None = None) -> str | None:
+    """The first supported symbol or asset named in the message.
 
-    Supports canonical tickers (USDJPY, BTCUSDT), separator-delimited pairs
-    (USD/JPY, EUR/USD, BTC-USDT), two-token pairs (USD JPY), and common asset aliases.
+    Supports canonical tickers (USDJPY, BTCUSDT, USDARS), natural language names
+    ("Argentine Peso", "Gold", "Tesla"), separator-delimited pairs (USD/JPY, USD/ARS),
+    space-separated pairs (USD ARS), and common asset aliases.
     """
     from quantedge.symbols import normalize_symbol
 
-    # 1. Separator pairs: e.g. "USD/JPY", "EUR/USD", "BTC/USDT", "BTC-USDT"
+    upper_text = text.upper()
+
+    # 1. Natural language asset names (e.g. "Argentine Peso" -> "USDARS", "Gold" -> "XAUUSD")
+    for name, sym in sorted(_ASSET_NAME_MAPPINGS.items(), key=lambda x: len(x[0]), reverse=True):
+        if re.search(rf"\b{re.escape(name)}\b", upper_text):
+            return sym
+
+    # 2. Separator pairs: e.g. "USD/JPY", "EUR/USD", "USD/ARS", "BTC/USDT", "BTC-USDT"
     sep_matches = re.findall(r"\b[A-Za-z0-9]{2,6}\s*[/_\-:]\s*[A-Za-z0-9]{2,6}\b", text)
     for m in sep_matches:
         try:
@@ -295,28 +373,55 @@ def _extract_symbol(text: str) -> str | None:
         except Exception:
             pass
 
-    # 2. Space-separated currency/asset pairs: e.g. "USD JPY", "EUR USD", "BTC USDT"
-    tokens = re.findall(r"[A-Za-z0-9]{2,12}", text.upper())
+    _STOP_WORDS = {
+        "GIVE", "SHOW", "SEND", "MAKE", "NEED", "WANT", "HAVE", "TAKE", "TELL",
+        "HOLD", "TIME", "CALL", "OPEN", "FAST", "SLOW", "VERY", "GOOD", "HIGH",
+        "FROM", "WHAT", "WHEN", "WITH", "THIS", "THAT", "THEM", "THEY", "YOUR",
+        "SOME", "MORE", "LESS", "NEXT", "LAST", "HERE", "TRUE", "REAL", "FREE",
+        "BEST", "LOOK", "SEEK", "FIND", "RATE", "STOP", "LOSS", "GAIN", "SIGN",
+        "AUTO", "PLAN", "WARN", "LONG", "SHORT", "RULE", "TEST", "TRADE", "SETUP",
+        "SIGNAL", "SIGNALS", "MARKET", "MARKETS", "PLEASE", "WHICH", "ABOUT",
+        "UNKNOWN", "ACTIVE", "CURRENT", "PLATFORM", "BRAIN", "SYSTEM", "ENGINE",
+        "COIN", "COINS", "PAIR", "PAIRS", "CURRENCY", "CURRENCIES", "STOCK", "STOCKS",
+        "MIN", "MINS", "MINUTE", "MINUTES", "HOUR", "HOURS", "NOW", "TODAY", "OUT",
+        "ANALYZE", "ANALYSIS", "ENTRY", "SCAN", "DOWN",
+    }
+
+    from quantedge.symbols import _ISO_CURRENCIES
+
+    _PREPOSITIONS = {"FOR", "IN", "ON", "THE", "AND", "OF", "TO", "AT", "BY", "WITH", "FROM"}
+    _EFFECTIVE_STOP = _STOP_WORDS | _PREPOSITIONS
+
+    # 3. Space-separated currency/asset pairs: e.g. "USD ARS", "USD JPY", "EUR USD", "BTC USDT"
+    tokens = re.findall(r"[A-Za-z0-9]{2,12}", upper_text)
     for i in range(len(tokens) - 1):
-        pair = tokens[i] + tokens[i + 1]
-        try:
-            if is_supported(pair):
-                return normalize_symbol(pair)
-        except Exception:
-            pass
+        t1, t2 = tokens[i], tokens[i + 1]
+        if t1 in _EFFECTIVE_STOP or t2 in _EFFECTIVE_STOP:
+            continue
+        # Forex: both halves must be valid ISO currency codes (e.g. USD JPY, EUR USD, USD ARS)
+        if t1 in _ISO_CURRENCIES and t2 in _ISO_CURRENCIES:
+            return normalize_symbol(t1 + t2)
+        # Crypto: e.g. BTC USDT, ETH USDT, SOL USDT
+        if t2 in ("USDT", "BUSD", "USDC") and len(t1) >= 2:
+            return normalize_symbol(t1 + t2)
 
-    # 3. Direct supported tokens and aliases
+    # 4. Direct supported tokens and aliases
+    from quantedge.services.tradingview import _EXCHANGE_MAP
+
     for token in tokens:
-        try:
-            if is_supported(token):
-                return normalize_symbol(token)
-        except Exception:
-            pass
-        alias = _SYMBOL_ALIASES.get(token)
-        if alias is not None and is_supported(alias):
-            return alias
+        if token in _EFFECTIVE_STOP or len(token) < 2:
+            continue
+        if token in _SYMBOL_ALIASES:
+            return _SYMBOL_ALIASES[token]
+        if token in _EXCHANGE_MAP:
+            return token
+        if token.endswith("USDT") or token.endswith("BUSD") or token.endswith("USDC"):
+            return normalize_symbol(token)
+        if len(token) == 6 and (token[:3] in _ISO_CURRENCIES and token[3:] in _ISO_CURRENCIES):
+            return normalize_symbol(token)
 
-    return None
+    return default or default_symbol
+
 
 
 def _extract_minutes(text: str) -> int | None:
@@ -406,8 +511,8 @@ def _handle_signal(
 
     # 1. Resolve target symbol: user explicitly typed one, OR passed one in default_symbol
     target_symbol = parsed.symbol
-    if not target_symbol and default_symbol and default_symbol.upper() not in ("ANY", "", "NONE", "BTCUSDT", "SELECT"):
-        target_symbol = default_symbol
+    if not target_symbol and default_symbol and default_symbol.upper() not in ("ANY", "", "NONE", "SELECT"):
+        target_symbol = default_symbol.strip().upper()
 
     # 2. Resolve hold duration (e.g. 1m, 5m, 10m, 15m, 60m)
     requested = parsed.minutes or default_minutes or _DEFAULT_HOLD_MINUTES
@@ -418,19 +523,16 @@ def _handle_signal(
         )
     minutes_used = requested
 
-    # 3. Helper to detect non-crypto assets (forex, commodities, equities)
+    # 3. Universal market routing: non-crypto, exotic, forex, commodities, and equities route to TradingView MCP
     from quantedge.services.tradingview import generate_tradingview_recommendation
 
-    def _is_non_crypto(sym: str) -> bool:
+    def _is_tradingview_direct(sym: str) -> bool:
         s = sym.upper()
-        return any(
-            k in s
-            for k in (
-                "JPY", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD",
-                "XAU", "XAG", "GOLD", "SILVER", "WTI", "BRENT", "OIL",
-                "SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL",
-            )
+        is_binance_crypto = (
+            s.endswith("USDT")
+            and any(s.startswith(c) for c in ("BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK", "MATIC", "POL", "LTC", "NEAR", "SUI", "PEPE", "SHIB", "TRX"))
         )
+        return not is_binance_crypto
 
     if target_symbol is None:
         try:
@@ -464,8 +566,8 @@ def _handle_signal(
                 )
     else:
         symbol = target_symbol
-        # Non-crypto symbols (Forex like USDJPY, Metals like Gold) or TwelveData limitations
-        if _is_non_crypto(symbol):
+        # All non-crypto and exotic markets (like USDARS, EURTRY, XAUUSD, NVDA) route directly to TradingView MCP
+        if _is_tradingview_direct(symbol):
             try:
                 rec = generate_tradingview_recommendation(symbol, minutes=minutes_used)
             except Exception as tv_exc:

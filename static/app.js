@@ -477,7 +477,15 @@ async function sendChat(message) {
         }
         appendChat('bot', body.text, { data: body.data, warnings: body.warnings });
         if (body.data?.recorded) { fetchMemoryStats(); fetchMemories(); }
-        if (body.data?.recommendation_id) { document.getElementById('fb-signal-id').value = body.data.recommendation_id; document.getElementById('fb-symbol').value = body.data.symbol; }
+        if (body.data?.recommendation_id) {
+            renderRecommendationCard(body.data);
+            const fbId = document.getElementById('fb-signal-id');
+            const fbSym = document.getElementById('fb-symbol');
+            if (fbId) fbId.value = body.data.recommendation_id;
+            if (fbSym) fbSym.value = body.data.symbol || symbol;
+        } else if (body.data?.status === 'NO_TRADE') {
+            renderNoTrade(body.data, symbol, minutes ? `${minutes}m` : '15m');
+        }
     } catch (error) {
         pending.remove();
         appendChat('bot', `Unable to reach the gateway: ${error.message}`, { error: true });

@@ -4,6 +4,20 @@ from fastapi.testclient import TestClient
 
 from quantedge.api.app import app
 from quantedge.services.chat import Intent, _extract_symbol, handle_message, parse_intent
+from quantedge.symbols import AssetClass, resolve_symbol
+
+
+def test_resolve_symbol_dynamic():
+    """Verify dynamic classification of exotic and unlisted markets."""
+    sym, ac = resolve_symbol("USDARS")
+    assert sym == "USDARS" and ac == AssetClass.FOREX
+    sym, ac = resolve_symbol("NVDA")
+    assert sym == "NVDA" and ac == AssetClass.STOCK
+    sym, ac = resolve_symbol("XAUUSD")
+    assert sym == "XAUUSD" and ac == AssetClass.COMMODITY
+    sym, ac = resolve_symbol("SPX")
+    assert sym == "SPX" and ac == AssetClass.INDEX
+
 
 
 def test_symbol_extraction_slash_pairs():
@@ -31,6 +45,10 @@ def test_symbol_extraction_aliases():
     assert _extract_symbol("YEN 5m") == "USDJPY"
     assert _extract_symbol("GOLD 15m") == "XAUUSD"
     assert _extract_symbol("SOL 15m") == "SOLUSDT"
+    assert _extract_symbol("give me a trade on argentine peso 10m") == "USDARS"
+    assert _extract_symbol("trade on tesla 5m") == "TSLA"
+    assert _extract_symbol("Give me a signal", default_symbol="USDARS") == "USDARS"
+
 
 
 def test_parse_intent_signal_usdjpy():

@@ -83,33 +83,59 @@ def supported_symbols(asset_class: AssetClass | str | None = None) -> list[str]:
     return sorted(s for s, ac in index.items() if ac is target)
 
 
+_KNOWN_COMMODITIES = {
+    "XAUUSD", "GOLD", "XAGUSD", "SILVER", "WTICOUSD", "WTI", "USOIL", "BRENT", "UKOIL", "NATGAS", "COPPER", "PLATINUM", "PALLADIUM"
+}
+_KNOWN_INDICES = {
+    "SPX", "NDX", "DJI", "US30", "NAS100", "US500", "DAX", "FTSE", "NIFTY", "VIX", "DXY"
+}
+_KNOWN_CRYPTO_SUFFIXES = ("USDT", "BUSD", "USDC", "BTC", "ETH")
+_KNOWN_CRYPTO_TOKENS = {
+    "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK", "MATIC", "POL", "LTC", "NEAR", "SUI", "PEPE", "SHIB", "TRX", "TON", "UNI", "APT"
+}
+_ISO_CURRENCIES = {
+    "USD", "EUR", "GBP", "JPY", "CHF", "CAD", "AUD", "NZD", "ARS", "TRY", "BRL", "MXN",
+    "INR", "ZAR", "SGD", "HKD", "NOK", "SEK", "DKK", "PLN", "CZK", "HUF", "ILS", "THB",
+    "IDR", "MYR", "PHP", "KRW", "CNY", "CNH", "RUB", "CLP", "COP", "PEN", "TWD", "AED", "SAR"
+}
+
+
 def is_supported(symbol: str) -> bool:
+    """True for any valid symbol that normalizes cleanly."""
     try:
-        return normalize_symbol(symbol) in _symbol_index()
+        normalize_symbol(symbol)
+        return True
     except ValidationError:
         return False
 
 
 def resolve_symbol(symbol: str) -> tuple[str, AssetClass]:
-    """Normalize and allowlist-check, returning ``(symbol, asset_class)``.
+    """Normalize and resolve symbol and its AssetClass.
 
-    Raises
-    ------
-    UnsupportedSymbolError
-        If the symbol is not on the allowlist. The error lists a few valid
-        examples rather than the entire allowlist.
+    Checks config index first. If not listed in config, dynamically infers
+    the asset class (Forex, Crypto, Commodity, Index, Stock) so that any
+    valid global market (e.g. USDARS, USDBRL, NVDA) is fully supported.
     """
     canonical = normalize_symbol(symbol)
     index = _symbol_index()
-    if canonical not in index:
-        raise UnsupportedSymbolError(
-            f"symbol '{canonical}' is not on the allowlist",
-            details={
-                "hint": "extend config/symbols.yaml to add it",
-                "examples": ", ".join(sorted(index)[:8]),
-            },
-        )
-    return canonical, index[canonical]
+    if canonical in index:
+        return canonical, index[canonical]
+
+    # Dynamic classification for universal markets
+    if canonical in _KNOWN_COMMODITIES:
+        return canonical, AssetClass.COMMODITY
+    if canonical in _KNOWN_INDICES:
+        return canonical, AssetClass.INDEX
+    if any(canonical.endswith(suf) for suf in _KNOWN_CRYPTO_SUFFIXES) or canonical in _KNOWN_CRYPTO_TOKENS:
+        return canonical, AssetClass.CRYPTO
+    if len(canonical) == 6 and (canonical[:3] in _ISO_CURRENCIES or canonical[3:] in _ISO_CURRENCIES):
+        return canonical, AssetClass.FOREX
+
+    # Default to STOCK / EQUITY for standard tickers (e.g. AAPL, NVDA, TSLA)
+    if len(canonical) <= 6:
+        return canonical, AssetClass.STOCK
+
+    return canonical, AssetClass.FOREX
 
 
 def asset_class_for(symbol: str) -> AssetClass:
