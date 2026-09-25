@@ -102,7 +102,11 @@ class Settings(BaseSettings):
     calendar_api_key: SecretStr | None = None
 
     # ---- LLM ----
-    llm_provider: LLMProviderName = "disabled"
+    # GLM (via Seek AI) is the default decision brain. This is safe without a key:
+    # default_llm_provider() returns None when SEEKAI_API_KEY is absent, and every
+    # caller treats None as "no review/decision available" and uses the
+    # deterministic gate instead -- so an unconfigured deploy degrades, not breaks.
+    llm_provider: LLMProviderName = "seekai"
     agentrouter_api_key: SecretStr | None = None
     agentrouter_base_url: str | None = None
     agentrouter_model: str | None = None

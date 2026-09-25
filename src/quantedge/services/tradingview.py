@@ -254,7 +254,12 @@ def get_tradingview_analysis(
     except Exception as exc:
         log.debug("TradingView screener query encountered transient error", extra={"symbol": sym, "error": str(exc)})
 
-    # Fallback to universal Yahoo Finance feed from tradingview_mcp
+    # Screener unavailable. Fall back to a REAL price from Yahoo -- but never
+    # fabricate indicators. A price with no computed RSI/MACD/structure is not a
+    # tradeable setup, so we return it as "price_only" with indicators explicitly
+    # null. The recommendation layer treats that as INSUFFICIENT_DATA and abstains
+    # rather than inventing a direction from a made-up RSI (the old behaviour that
+    # drove the accuracy regression).
     try:
         from tradingview_mcp.core.services.yahoo_finance_service import get_price
 
@@ -274,54 +279,15 @@ def get_tradingview_analysis(
 
         yf_data = get_price(yf_sym)
         if yf_data and yf_data.get("price"):
-            p_val = float(yf_data["price"])
-            chg = float(yf_data.get("change_pct") or 0.0)
-            is_bull = chg >= 0.0
-
-            # Derive institutional Floor Pivots based on live market price and spread
-            spread = max(p_val * 0.003, 0.0001)
-            s1 = round(p_val - spread, 4)
-            r1 = round(p_val + spread * 2.0, 4)
-
             return {
-                "status": "ok",
+                "status": "price_only",
                 "symbol": sym,
                 "exchange": venue,
                 "timeframe": tf,
-                "price": p_val,
-                "rsi": {
-                    "value": 58.5 if is_bull else 43.5,
-                    "signal": "Bullish" if is_bull else "Bearish",
-                    "direction": "Rising" if is_bull else "Falling",
-                },
-                "macd": {"macd": None, "signal": None, "histogram": 0.01 if is_bull else -0.01, "cross": None},
-                "bollinger_bands": {
-                    "upper": round(p_val + spread * 1.5, 4),
-                    "middle": p_val,
-                    "lower": round(p_val - spread * 1.5, 4),
-                    "squeeze": True,
-                    "position": "Upper Half" if is_bull else "Lower Half",
-                },
-                "pivots": {
-                    "pivot": p_val,
-                    "s1": s1,
-                    "r1": r1,
-                    "nearest_support": s1,
-                    "nearest_resistance": r1,
-                },
-                "market_structure": {
-                    "trend": "Bullish" if is_bull else "Bearish",
-                    "trend_score": 2 if is_bull else -2,
-                    "trend_strength": "Moderate",
-                    "signals": ["TradingView institutional momentum aligned"],
-                    "candle": {},
-                },
-                "sentiment": {
-                    "rating": 2 if is_bull else -2,
-                    "signal": "BUY" if is_bull else "SELL",
-                    "volatility": "Moderate",
-                    "momentum": "Bullish" if is_bull else "Bearish",
-                },
+                "price": float(yf_data["price"]),
+                "change_pct": float(yf_data.get("change_pct") or 0.0),
+                "indicators_available": False,
+                "note": "Live price only; technical indicators unavailable from screener.",
             }
     except Exception as yf_exc:
         log.warning("Yahoo Finance fallback quote failed", extra={"symbol": sym, "error": str(yf_exc)})
@@ -412,125 +378,231 @@ def format_tradingview_summary(analysis: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def generate_tradingview_recommendation(
-    symbol: str,
-    minutes: int = 15,
-) -> Any:
-    """Generate a high-conviction trade recommendation from live TradingView institutional analysis."""
+_CONFIRM_TF: dict[str, str] = {"1m": "15m", "5m": "1h", "15m": "1h", "30m": "4h", "1h": "4h"}
+
+
+def _tf_directional_vote(analysis: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Net directional vote (-4..+4) from REAL indicators only; None if unavailable.
+
+    Four equally-weighted sub-votes -- market-structure trend, aggregate sentiment,
+    RSI (tightened 55/45 bands; mid-range counts as neutral), and MACD histogram
+    sign. Nothing is inferred from price alone.
+    """
+    if not analysis or analysis.get("status") != "ok":
+        return None
+    struct = analysis.get("market_structure") or {}
+    sent = analysis.get("sentiment") or {}
+    rsi = analysis.get("rsi") or {}
+    macd = analysis.get("macd") or {}
+    votes: dict[str, int] = {}
+
+    trend = str(struct.get("trend") or "").lower()
+    votes["trend"] = 1 if ("bull" in trend or "up" in trend) else (-1 if ("bear" in trend or "down" in trend) else 0)
+
+    sig = str(sent.get("signal") or "").upper()
+    votes["sentiment"] = 1 if sig in ("BUY", "STRONG_BUY") else (-1 if sig in ("SELL", "STRONG_SELL") else 0)
+
+    rv = rsi.get("value")
+    votes["rsi"] = (1 if rv >= 55 else (-1 if rv <= 45 else 0)) if isinstance(rv, (int, float)) else 0
+
+    hist = macd.get("histogram")
+    votes["macd"] = (1 if hist > 0 else (-1 if hist < 0 else 0)) if isinstance(hist, (int, float)) else 0
+
+    return {"net": sum(votes.values()), "votes": votes}
+
+
+def _tv_risk_levels(is_up: bool, price: Any, pivots: dict[str, Any]) -> tuple[Any, Any, Any, str] | None:
+    """(stop, target, rr, basis) from REAL pivots only. None if no usable structure.
+
+    A long needs a real support below price to stop under and a real resistance
+    above to aim at; a short is the mirror. No volatility-percent stop and no
+    synthetic multiple target -- absent structure means the caller declines.
+    """
+    from decimal import Decimal
+
+    def _d(x: Any) -> Any:
+        try:
+            return Decimal(str(x)) if x is not None else None
+        except Exception:
+            return None
+
+    if is_up:
+        stop = next((v for k in ("s1", "nearest_support", "pivot") if (v := _d(pivots.get(k))) is not None and v < price), None)
+        target = next((v for k in ("r1", "nearest_resistance", "r2") if (v := _d(pivots.get(k))) is not None and v > price), None)
+        if stop is None or target is None:
+            return None
+        risk, reward, basis = price - stop, target - price, "long: pivot support stop -> resistance target"
+    else:
+        stop = next((v for k in ("r1", "nearest_resistance", "pivot") if (v := _d(pivots.get(k))) is not None and v > price), None)
+        target = next((v for k in ("s1", "nearest_support", "s2") if (v := _d(pivots.get(k))) is not None and v < price), None)
+        if stop is None or target is None:
+            return None
+        risk, reward, basis = stop - price, price - target, "short: pivot resistance stop -> support target"
+    if risk <= 0 or reward <= 0:
+        return None
+    return stop, target, reward / risk, basis
+
+
+def _evidence_slice(analysis: dict[str, Any] | None, vote: dict[str, Any] | None) -> dict[str, Any]:
+    """Compact, real-only indicator snapshot handed to the AI brain."""
+    if not analysis:
+        return {"available": False}
+    rsi = analysis.get("rsi") or {}
+    macd = analysis.get("macd") or {}
+    struct = analysis.get("market_structure") or {}
+    sent = analysis.get("sentiment") or {}
+    bb = analysis.get("bollinger_bands") or {}
+    return {
+        "available": True,
+        "trend": struct.get("trend"),
+        "trend_strength": struct.get("trend_strength"),
+        "rsi": rsi.get("value"),
+        "macd_histogram": macd.get("histogram"),
+        "sentiment_signal": sent.get("signal"),
+        "bollinger_squeeze": bb.get("squeeze"),
+        "net_vote": (vote or {}).get("net"),
+        "votes": (vote or {}).get("votes"),
+    }
+
+
+def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
+    """Decide a trade from LIVE TradingView evidence across two timeframes.
+
+    Shared decision core for both the recommendation and the signal-decision entry
+    points. The AI brain (GLM via Seek AI) is the decision authority when reachable
+    within budget; a deterministic multi-timeframe alignment gate is the pre-filter
+    and the fallback. Every input is real (never fabricated) and NO_TRADE is
+    first-class -- abstention is raised as ``NoTradeReason``.
+
+    Returns a dict of the fully resolved decision (direction, real pivot-based risk
+    levels, honest agreement-based confidence, brain attribution, rationale) for a
+    caller to render as a ``TradeRecommendation`` or an ``AIDecision``.
+    """
     import uuid
     from datetime import timedelta
     from decimal import Decimal
-    from quantedge.contracts import (
-        AIDecision,
-        SignalDirection,
-        SignalStatus,
-        TradeRecommendation,
-        utc_now,
-    )
+    from quantedge.contracts import SignalDirection, SignalStatus, utc_now
     from quantedge.services.horizons import horizon_for_minutes
+    from quantedge.services.risk import MIN_ACCEPTABLE_RR
     from quantedge.services.signal import NoTradeReason
 
     sym, venue = resolve_tradingview_target(symbol)
-    tf = "1m" if minutes <= 1 else ("5m" if minutes <= 5 else ("15m" if minutes <= 15 else ("30m" if minutes <= 30 else "1h")))
-    analysis = get_tradingview_analysis(sym, timeframe=tf)
+    exec_tf = "1m" if minutes <= 1 else ("5m" if minutes <= 5 else ("15m" if minutes <= 15 else ("30m" if minutes <= 30 else "1h")))
+    confirm_tf = _CONFIRM_TF.get(exec_tf, "1h")
 
-    # If TradingView API rate limits or encounters transient errors, fall back to live provider quote
-    if analysis.get("status") != "ok" or not analysis.get("price"):
-        try:
-            from quantedge.providers.registry import get_registry
-            reg = get_registry()
-            quote = reg.get_quote(sym)
-            if quote and (quote.last or quote.mid):
-                p_val = float(quote.last or quote.mid)
-                chg = float(quote.change_24h_percent or 0)
-                analysis = {
-                    "status": "ok",
-                    "price": p_val,
-                    "sentiment": {"signal": "BUY" if chg >= 0 else "SELL"},
-                    "market_structure": {"trend": "Bullish" if chg >= 0 else "Bearish"},
-                    "rsi": {"value": 56.0 if chg >= 0 else 44.0},
-                    "pivots": {},
-                }
-        except Exception:
-            pass
-
-    if analysis.get("status") != "ok":
-        err = analysis.get("error", "unknown error")
-        raise NoTradeReason(
-            SignalStatus.INSUFFICIENT_DATA,
-            f"Market analysis unavailable for {sym}: {err}",
-        )
-
-    price_val = analysis.get("price")
+    exec_a = get_tradingview_analysis(sym, timeframe=exec_tf)
+    if exec_a.get("status") != "ok":
+        detail = exec_a.get("note") or exec_a.get("error") or "screener returned no indicators"
+        raise NoTradeReason(SignalStatus.INSUFFICIENT_DATA, f"No verified indicators for {sym} on {exec_tf}: {detail}")
+    price_val = exec_a.get("price")
     if not price_val:
+        raise NoTradeReason(SignalStatus.INSUFFICIENT_DATA, f"No live price returned for {sym}")
+
+    confirm_a = get_tradingview_analysis(sym, timeframe=confirm_tf)
+    exec_vote = _tf_directional_vote(exec_a)
+    confirm_vote = _tf_directional_vote(confirm_a)
+    if exec_vote is None:
+        raise NoTradeReason(SignalStatus.INSUFFICIENT_DATA, f"Execution indicators unavailable for {sym}")
+    if confirm_vote is None:
+        raise NoTradeReason(SignalStatus.INSUFFICIENT_DATA, f"No higher-timeframe ({confirm_tf}) confirmation for {sym}; standing aside")
+
+    e_net = exec_vote["net"]
+    c_net = confirm_vote["net"]
+    e_sign = 1 if e_net > 0 else (-1 if e_net < 0 else 0)
+    c_sign = 1 if c_net > 0 else (-1 if c_net < 0 else 0)
+    # Multi-timeframe alignment gate: both timeframes lean the same way and the
+    # execution timeframe shows >= 2/4 real indicators agreeing. Otherwise skip.
+    if e_sign == 0 or c_sign == 0 or e_sign != c_sign:
         raise NoTradeReason(
-            SignalStatus.INSUFFICIENT_DATA,
-            f"No live price returned for {sym}",
+            SignalStatus.NO_TRADE,
+            f"{sym}: {exec_tf}/{confirm_tf} not aligned (no directional edge)",
+            detail=f"exec net {e_net}, confirm net {c_net} from real indicators",
         )
+    if abs(e_net) < 2:
+        raise NoTradeReason(
+            SignalStatus.NO_TRADE,
+            f"{sym}: execution indicators do not agree strongly enough (net {e_net}/4)",
+        )
+    det_direction = SignalDirection.UP if e_sign > 0 else SignalDirection.DOWN
 
     price = Decimal(str(price_val))
-    pivots = analysis.get("pivots", {})
-    struct = analysis.get("market_structure", {})
-    sent = analysis.get("sentiment", {})
-    rsi = analysis.get("rsi", {})
-    bb = analysis.get("bollinger_bands", {})
-    rsi_val = float(rsi.get("value") or 50.0)
-    sig = (sent.get("signal") or "NEUTRAL").upper()
-    trend = struct.get("trend") or "Neutral/Ranging"
-    trend_score = int(struct.get("trend_score") or 0)
+    pivots = exec_a.get("pivots") or {}
+    bb = exec_a.get("bollinger_bands") or {}
 
-    # 1. Determine Direction from Institutional Momentum and Trend
-    if sig in ("BUY", "STRONG_BUY") or trend == "Bullish" or rsi_val > 52:
-        direction = SignalDirection.UP
-    elif sig in ("SELL", "STRONG_SELL") or trend == "Bearish" or rsi_val < 48:
-        direction = SignalDirection.DOWN
-    else:
-        pivot_val = pivots.get("pivot")
-        if pivot_val and price >= Decimal(str(pivot_val)):
-            direction = SignalDirection.UP
-        else:
-            direction = SignalDirection.DOWN
+    # Hand the REAL evidence to the AI brain to DECIDE. GLM leads when reachable;
+    # the deterministic gate above is the guardrail and the fallback.
+    evidence = {
+        "symbol": sym,
+        "venue": venue,
+        "hold_minutes": minutes,
+        "execution_timeframe": exec_tf,
+        "confirmation_timeframe": confirm_tf,
+        "price": price_val,
+        "execution": _evidence_slice(exec_a, exec_vote),
+        "confirmation": _evidence_slice(confirm_a, confirm_vote),
+        "deterministic_candidate": det_direction.value,
+        "deterministic_agreement": f"exec {abs(e_net)}/4, confirm {abs(c_net)}/4",
+    }
+
+    brain, brain_model = "deterministic", "tv_gate_v2"
+    conviction: float | None = None
+    glm_reason = glm_invalidation = ""
+    direction = det_direction
+
+    try:
+        from quantedge.providers.llm import default_llm_provider
+        provider = default_llm_provider()
+    except Exception:
+        provider = None
+    decide = getattr(provider, "decide_trade", None) if provider is not None else None
+    if callable(decide):
+        try:
+            verdict = decide(evidence)
+            gd = verdict.get("decision")
+            if gd == "NO_TRADE":
+                raise NoTradeReason(
+                    SignalStatus.NO_TRADE,
+                    f"{sym}: AI brain ({verdict.get('brain', 'glm')}) declined despite alignment",
+                    detail=verdict.get("reason") or "",
+                )
+            gdir = SignalDirection.UP if gd == "UP" else SignalDirection.DOWN
+            if gdir != det_direction:
+                raise NoTradeReason(
+                    SignalStatus.NO_TRADE,
+                    f"{sym}: AI brain disagrees with aligned multi-timeframe evidence; standing aside",
+                    detail=verdict.get("reason") or "",
+                )
+            direction = gdir
+            brain, brain_model = "seekai", str(verdict.get("brain") or "glm-5.3-flash")
+            conviction = verdict.get("conviction")
+            glm_reason = verdict.get("reason") or ""
+            glm_invalidation = verdict.get("invalidation") or ""
+        except NoTradeReason:
+            raise
+        except Exception as brain_exc:
+            log.info("AI brain decide_trade unavailable for %s (%s); deterministic decision stands", sym, type(brain_exc).__name__)
 
     now = utc_now()
     exp = now + timedelta(minutes=minutes)
 
-    # 2. Derive precision Stop Loss and Take Profit from institutional floor pivots
-    if direction == SignalDirection.UP:
-        support = pivots.get("s1") or pivots.get("nearest_support") or pivots.get("pivot")
-        if support and Decimal(str(support)) < price:
-            stop = Decimal(str(support))
-        else:
-            stop = price * Decimal("0.995")
-        risk = price - stop
-        if risk <= Decimal("0"):
-            risk = price * Decimal("0.005")
-            stop = price - risk
+    # Stop/target from REAL pivots only -- no volatility-percent stop, no synthetic
+    # 2R target. If the structure needed to place a stop and a reachable target
+    # isn't there, the setup is declined rather than invented.
+    levels = _tv_risk_levels(direction == SignalDirection.UP, price, pivots)
+    if levels is None:
+        raise NoTradeReason(
+            SignalStatus.NO_TRADE,
+            f"{sym}: no real pivot structure to place a stop and a reachable target",
+        )
+    stop, target, rr, basis = levels
+    if rr < MIN_ACCEPTABLE_RR:
+        raise NoTradeReason(
+            SignalStatus.NO_TRADE,
+            f"{sym}: reward:risk {rr:.2f} is below the {MIN_ACCEPTABLE_RR} minimum",
+            detail=f"stop {stop} / target {target} from real pivots ({basis})",
+        )
 
-        resistance = pivots.get("r1") or pivots.get("nearest_resistance") or pivots.get("r2")
-        if resistance and Decimal(str(resistance)) > price and (Decimal(str(resistance)) - price) / risk >= Decimal("1.2"):
-            target = Decimal(str(resistance))
-        else:
-            target = price + risk * Decimal("2.0")
-        rr = (target - price) / risk
-    else:
-        resistance = pivots.get("r1") or pivots.get("nearest_resistance") or pivots.get("pivot")
-        if resistance and Decimal(str(resistance)) > price:
-            stop = Decimal(str(resistance))
-        else:
-            stop = price * Decimal("1.005")
-        risk = stop - price
-        if risk <= Decimal("0"):
-            risk = price * Decimal("0.005")
-            stop = price + risk
-
-        support = pivots.get("s1") or pivots.get("nearest_support") or pivots.get("s2")
-        if support and Decimal(str(support)) < price and (price - Decimal(str(support))) / risk >= Decimal("1.2"):
-            target = Decimal(str(support))
-        else:
-            target = price - risk * Decimal("2.0")
-        rr = (price - target) / risk
-
-    # 3. Resolve Asset Class
+    # 3. Asset class
     sym_upper = sym.upper()
     if any(k in sym_upper for k in ("JPY", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD")):
         ast = "forex"
@@ -541,70 +613,136 @@ def generate_tradingview_recommendation(
     else:
         ast = "crypto"
 
-    squeeze_note = " Bollinger Squeeze active (breakout pending)." if bb.get("squeeze") else ""
-    rationale = (
-        f"TradingView Institutional Consensus: {trend} trend ({struct.get('trend_strength', 'Moderate')}), "
-        f"RSI {rsi_val:.1f} ({rsi.get('direction', 'Stable')}), {sig} rating. "
-        f"Institutional floor pivots S1/R1 applied.{squeeze_note}"
-    )
+    # Honest confidence: multi-timeframe agreement (0..1) mapped to 50..90, blended
+    # with the brain's conviction when the brain decided. An agreement measure, NOT
+    # a calibrated win probability, and never presented as one.
+    agreement = (abs(e_net) + abs(c_net)) / 8.0
+    base_conf = 50 + round(agreement * 40)
+    confidence = int(round((base_conf + conviction * 100) / 2)) if conviction is not None else int(base_conf)
+    confidence = max(50, min(90, confidence))
 
-    rec_id = f"rec-tv-{uuid.uuid4().hex[:10]}"
-    confidence = 78 if abs(trend_score) >= 3 else 72
+    trend = (exec_a.get("market_structure") or {}).get("trend") or direction.value
+    squeeze_note = " Bollinger squeeze active (breakout pending)." if bb.get("squeeze") else ""
+    if brain == "seekai":
+        rationale = (
+            f"AI brain ({brain_model}) decided {direction.value}, confirmed by {exec_tf}/{confirm_tf} "
+            f"alignment ({abs(e_net)}/4 and {abs(c_net)}/4 real indicators agree). {glm_reason}{squeeze_note}"
+        )
+    else:
+        rationale = (
+            f"Multi-timeframe gate: {exec_tf} and {confirm_tf} both {direction.value} "
+            f"({abs(e_net)}/4 and {abs(c_net)}/4 real indicators agree); levels from real pivots ({basis})."
+            f"{squeeze_note} AI brain unavailable within budget."
+        )
+
+    return {
+        "decision_id": f"rec-tv-{uuid.uuid4().hex[:10]}",
+        "symbol": sym,
+        "venue": venue,
+        "asset_class": ast,
+        "horizon": horizon_for_minutes(minutes),
+        "direction": direction,
+        "now": now,
+        "expiry": exp,
+        "reference_price": price,
+        "stop": stop.quantize(price),
+        "target": target.quantize(price),
+        "risk_reward_ratio": round(rr, 2),
+        "agreement": agreement,
+        "confidence": confidence,
+        "regime": trend,
+        "rationale": rationale,
+        "brain": brain,
+        "brain_model": brain_model,
+        "glm_invalidation": glm_invalidation,
+    }
+
+
+def _tv_build_decision(d: dict[str, Any]) -> Any:
+    """Render a decision-core dict as a SIGNAL AIDecision (no persistence)."""
+    from quantedge.contracts import AIDecision, SignalStatus
+
+    return AIDecision(
+        decision_id=d["decision_id"],
+        symbol=d["symbol"],
+        horizon=d["horizon"],
+        status=SignalStatus.SIGNAL,
+        direction=d["direction"],
+        reference_price=d["reference_price"],
+        expiry_utc=d["expiry"],
+        regime=d["regime"],
+        heuristic_score=d["confidence"] / 100.0,
+        calibrated_probability=None,
+        supporting_evidence=[d["rationale"]],
+        contradictory_evidence=[],
+        invalidation_conditions=[d["glm_invalidation"]] if d["glm_invalidation"] else [],
+        missing_information=[],
+        llm_provider=d["brain"],
+        llm_model=d["brain_model"],
+        scanner_version="tv_gate_v2",
+        data_quality_status=None,
+        created_at_utc=d["now"],
+    )
+def generate_tradingview_recommendation(symbol: str, minutes: int = 15) -> Any:
+    """Decide a trade from LIVE TradingView evidence; return a TradeRecommendation.
+
+    Thin renderer over :func:`_tradingview_decision_core`. Raises ``NoTradeReason``
+    when the core abstains (first-class NO_TRADE / INSUFFICIENT_DATA), and records
+    the real brain + model that decided into the lifecycle store.
+    """
+    from quantedge.contracts import TradeRecommendation
+
+    d = _tradingview_decision_core(symbol, minutes)
     rec = TradeRecommendation(
-        recommendation_id=rec_id,
-        symbol=sym,
-        asset_class=ast,
-        horizon=horizon_for_minutes(minutes),
-        direction=direction,
-        valid_from_utc=now,
-        valid_until_utc=exp,
-        reference_price=price,
-        stop_loss=stop.quantize(price),
-        take_profit=target.quantize(price),
-        risk_reward_ratio=round(rr, 2),
-        risk_level="HIGH_CONVICTION" if abs(trend_score) >= 3 else "MODERATE_CONVICTION",
-        recommended_venue=f"TradingView ({venue})",
-        regime=trend,
+        recommendation_id=d["decision_id"],
+        symbol=d["symbol"],
+        asset_class=d["asset_class"],
+        horizon=d["horizon"],
+        direction=d["direction"],
+        valid_from_utc=d["now"],
+        valid_until_utc=d["expiry"],
+        reference_price=d["reference_price"],
+        stop_loss=d["stop"],
+        take_profit=d["target"],
+        risk_reward_ratio=d["risk_reward_ratio"],
+        risk_level="HIGH_CONVICTION" if d["agreement"] >= 0.75 else "MODERATE_CONVICTION",
+        recommended_venue=f"TradingView ({d['venue']})",
+        regime=d["regime"],
         memory_consulted_count=0,
         key_lessons_applied=[],
         memory_rules_applied=[],
-        heuristic_score=confidence / 100.0,
-        confidence_pct=confidence,
-        rationale=rationale,
+        heuristic_score=d["confidence"] / 100.0,
+        confidence_pct=d["confidence"],
+        rationale=d["rationale"],
         warnings=[],
-        generated_at_utc=now,
+        generated_at_utc=d["now"],
     )
-
-    # 4. Record into persistence for autonomous lifecycle tracking
     try:
         from quantedge.repositories import get_repository
         from quantedge.services.signal import _persist
 
-        repo = get_repository()
-        decision = AIDecision(
-            decision_id=rec_id,
-            symbol=sym,
-            horizon=rec.horizon,
-            status=SignalStatus.SIGNAL,
-            direction=direction,
-            reference_price=price,
-            expiry_utc=exp,
-            regime=trend,
-            heuristic_score=rec.heuristic_score,
-            calibrated_probability=None,
-            supporting_evidence=[rationale],
-            contradictory_evidence=[],
-            invalidation_conditions=[],
-            missing_information=[],
-            llm_provider="tradingview",
-            llm_model="mcp_intelligence",
-            scanner_version="tv_v1",
-            data_quality_status=None,
-            created_at_utc=now,
-        )
-        _persist(repo, decision)
+        _persist(get_repository(), _tv_build_decision(d))
     except Exception as exc:
         log.debug("could not persist tradingview decision into lifecycle", extra={"error": str(exc)})
-
     return rec
+def generate_tradingview_decision(symbol: str, *, minutes: int = 15) -> Any:
+    """Decide a trade from LIVE TradingView evidence; return an AIDecision.
+
+    The signal-decision entry point for non-crypto symbols (forex, metals, indices,
+    equities), which have no Binance candle feed and cannot be served by the
+    deterministic candle scan. Same real-evidence core and GLM brain as the
+    recommendation path, rendered as an ``AIDecision`` and persisted. Raises
+    ``NoTradeReason`` when the core abstains, so callers surface an honest
+    NO_TRADE / INSUFFICIENT_DATA rather than a manufactured setup.
+    """
+    d = _tradingview_decision_core(symbol, minutes)
+    decision = _tv_build_decision(d)
+    try:
+        from quantedge.repositories import get_repository
+        from quantedge.services.signal import _persist
+
+        _persist(get_repository(), decision)
+    except Exception as exc:
+        log.debug("could not persist tradingview decision", extra={"error": str(exc)})
+    return decision
 

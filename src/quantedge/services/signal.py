@@ -77,6 +77,20 @@ class NoTradeReason(Exception):
         self.detail = detail
 
 
+# Symbols with a native Binance USDT candle feed. Everything else -- forex, metals,
+# indices, equities, and exotic crypto without a Binance pair -- has no candle feed
+# here and must be decided from live TradingView evidence, not the candle scan.
+_BINANCE_NATIVE_PREFIXES = (
+    "BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX",
+    "DOT", "LINK", "MATIC", "POL", "LTC", "NEAR", "SUI", "PEPE", "SHIB", "TRX",
+)
+
+
+def _is_binance_native(symbol: str) -> bool:
+    clean = symbol.upper().replace("/", "").replace("-", "")
+    return clean.endswith("USDT") and any(clean.startswith(c) for c in _BINANCE_NATIVE_PREFIXES)
+
+
 def generate_signal_decision(
     symbol: str,
     *,
@@ -91,6 +105,32 @@ def generate_signal_decision(
     ``NO_TRADE`` with the scanner's own rejection reason. The data-quality status
     on the record is the status the quality engine actually returned.
     """
+    # Non-crypto symbols (forex, metals, indices, equities, exotic crypto without a
+    # Binance pair) have no candle feed for the deterministic scan below, so
+    # run_scan cannot serve them -- the failure that made evaluate_signal return a
+    # data-fetch error for e.g. XAUUSD. Route them through the same universal
+    # TradingView path the recommendation entry uses, with GLM as the brain. An
+    # honest abstention there surfaces as a real NO_TRADE / INSUFFICIENT_DATA
+    # record, never a manufactured setup.
+    if not _is_binance_native(symbol):
+        from quantedge.services.tradingview import generate_tradingview_decision
+
+        try:
+            return generate_tradingview_decision(symbol, minutes=horizon_minutes(horizon))
+        except NoTradeReason as ntr:
+            is_no_trade = ntr.status is SignalStatus.NO_TRADE
+            decision = AIDecision(
+                decision_id=str(uuid.uuid4()),
+                symbol=symbol,
+                horizon=horizon,
+                status=ntr.status,
+                contradictory_evidence=[ntr.reason] if is_no_trade else [],
+                missing_information=[] if is_no_trade else [ntr.reason],
+                created_at_utc=utc_now(),
+            )
+            _persist(get_repository(), decision)
+            return decision
+
     repo = get_repository()
     scan = run_scan(
         [symbol],
@@ -203,17 +243,21 @@ def generate_trade_recommendation(
     dur = hold_minutes if hold_minutes is not None else horizon_minutes(horizon)
 
     # Universal market routing: non-crypto or non-Binance pairs execute directly via TradingView MCP
-    clean = symbol.upper().replace("/", "").replace("-", "")
-    is_binance_native = (
-        clean.endswith("USDT")
-        and any(clean.startswith(c) for c in ("BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOGE", "AVAX", "DOT", "LINK", "MATIC", "POL", "LTC", "NEAR", "SUI", "PEPE", "SHIB", "TRX"))
-    )
-
-    if not is_binance_native:
+    if not _is_binance_native(symbol):
+        # Non-crypto (forex, metals, indices, equities) has no Binance candle feed;
+        # TradingView is the only valid path. An honest abstention there IS the
+        # answer -- propagate it rather than falling through to the crypto engine,
+        # which would fetch the wrong series and manufacture a setup.
         try:
             return generate_tradingview_recommendation(symbol, minutes=dur)
+        except NoTradeReason:
+            raise
         except Exception as tv_exc:
             log.warning("TradingView direct recommendation failed for %s: %s", symbol, tv_exc)
+            raise NoTradeReason(
+                SignalStatus.INSUFFICIENT_DATA,
+                f"no live market data reachable for {symbol}",
+            ) from tv_exc
 
     try:
         decision = generate_signal_decision(
@@ -230,10 +274,16 @@ def generate_trade_recommendation(
             raise
 
     if decision.status is not SignalStatus.SIGNAL or decision.direction is None:
-        try:
-            return generate_tradingview_recommendation(symbol, minutes=dur)
-        except Exception:
-            pass
+        # A deterministic NO_TRADE is a considered decision -- honour it. Only reach
+        # for TradingView when the engine genuinely lacked data (INSUFFICIENT_DATA),
+        # so the fallback adds evidence instead of overriding an abstention.
+        if decision.status is SignalStatus.INSUFFICIENT_DATA:
+            try:
+                return generate_tradingview_recommendation(symbol, minutes=dur)
+            except NoTradeReason:
+                raise
+            except Exception:
+                pass
 
         # Which list holds the reason depends on why the decision came back.
         if decision.status is SignalStatus.INSUFFICIENT_DATA:

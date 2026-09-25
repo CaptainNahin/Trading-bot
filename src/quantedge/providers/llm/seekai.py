@@ -88,7 +88,11 @@ class SeekAILLMProvider(BaseLLMProvider):
         raw_url = base_url or settings.seekai_base_url or _DEFAULT_BASE_URL
         self._base_url = _normalise_base_url(raw_url)
         raw_timeout = float(settings.llm_timeout_seconds or _TIMEOUT_SECONDS)
-        self._timeout = min(raw_timeout, 25.0)
+        # Ceiling raised to 45s so a full trade DECISION (measured ~28-40s on the
+        # glm-5.3-flash reasoning model) can complete inside the 60s serverless
+        # function budget. Review/chat/post-mortem still take their own tighter
+        # min(...) caps below, so they are unaffected by this larger ceiling.
+        self._timeout = min(raw_timeout, 45.0)
 
     @property
     def base_url(self) -> str:
@@ -208,6 +212,89 @@ class SeekAILLMProvider(BaseLLMProvider):
         from quantedge.services.llm_review import validate_llm_response
 
         return validate_llm_response(payload, context)
+
+    def decide_trade(
+        self,
+        evidence: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Let the AI brain DECIDE a trade from real, pre-verified market evidence.
+
+        This is the decision authority (not merely a reviewer): it receives real
+        indicators already computed from live TradingView data across two
+        timeframes plus the deterministic candidate, and returns its own verdict.
+
+        Returns a validated dict::
+
+            {"decision": "UP"|"DOWN"|"NO_TRADE", "conviction": 0.0-1.0,
+             "reason": str, "invalidation": str, "brain": <model id>}
+
+        Raises a provider error on timeout, rate limit, or unparseable output so
+        the caller can fall back to the deterministic gated decision. NO_TRADE is
+        a first-class, expected outcome -- abstention is never treated as failure.
+        """
+        if not self._api_key:
+            raise ProviderUnavailableError(
+                self.provider_name, "SEEKAI_API_KEY is not configured"
+            )
+
+        system = (
+            "You are the decision brain of a quantitative trading bot. You are given "
+            "REAL, already-verified market evidence: indicators computed from live "
+            "TradingView data across an execution timeframe and a higher confirmation "
+            "timeframe. Decide the trade for the stated holding window.\n"
+            "You MUST answer NO_TRADE when the evidence is thin, the two timeframes "
+            "conflict, price sits mid-range with no edge, or momentum is exhausted -- "
+            "abstaining is correct and expected, not a failure. Do NOT invent numbers, "
+            "prices, or levels beyond those provided. Trade only WITH the higher "
+            "timeframe, never against a strong one.\n"
+            "Reply with exactly ONE raw JSON object and nothing else -- no markdown, "
+            "no prose, no code fence:\n"
+            '{"decision":"UP|DOWN|NO_TRADE","conviction":0.0-1.0,'
+            '"reason":"one sentence citing the specific evidence",'
+            '"invalidation":"the level or condition that would prove this wrong"}'
+        )
+        user = (
+            "REAL market evidence (do not fabricate anything beyond this):\n"
+            "```json\n"
+            + json.dumps(evidence, indent=2, sort_keys=True, default=str)
+            + "\n```"
+        )
+
+        budget = timeout if timeout is not None else min(self._timeout, 40.0)
+        text = self._call_model(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=1200,
+            temperature=0.1,
+            timeout=budget,
+            primary_only=True,
+        )
+        payload = extract_json_object(text, provider=self.provider_name)
+
+        decision = str(payload.get("decision", "")).strip().upper()
+        if decision not in ("UP", "DOWN", "NO_TRADE"):
+            raise ProviderBadResponseError(
+                self.provider_name,
+                f"decision '{decision}' is not one of UP/DOWN/NO_TRADE",
+                sample=text[:200],
+            )
+        try:
+            conviction = float(payload.get("conviction"))
+        except (TypeError, ValueError):
+            conviction = 0.0
+        conviction = max(0.0, min(1.0, conviction))
+
+        return {
+            "decision": decision,
+            "conviction": conviction,
+            "reason": str(payload.get("reason") or "").strip()[:400],
+            "invalidation": str(payload.get("invalidation") or "").strip()[:400],
+            "brain": SeekAILLMProvider._ACTIVE_MODEL or self.model_name,
+        }
 
     def analyze_loss_postmortem(
         self,
@@ -345,8 +432,14 @@ class SeekAILLMProvider(BaseLLMProvider):
         max_tokens: int = _MAX_TOKENS,
         temperature: float = _TEMPERATURE,
         timeout: float | None = None,
+        primary_only: bool = False,
     ) -> str:
-        """Call Seek AI chat completion endpoint with automatic fallback on quota exhaustion."""
+        """Call Seek AI chat completion endpoint with automatic fallback on quota exhaustion.
+
+        When ``primary_only`` is set the entire budget goes to a single model with
+        no failover halving -- used for trade DECISIONS, where the slow reasoning
+        model needs the full window rather than budget/2 split across candidates.
+        """
         endpoint = f"{self._base_url}/chat/completions"
         active_candidate = SeekAILLMProvider._ACTIVE_MODEL or self.model_name
         models_to_try: list[str] = [active_candidate]
@@ -355,8 +448,9 @@ class SeekAILLMProvider(BaseLLMProvider):
                 models_to_try.append(cand)
         # Bounded candidates: at most 3 real models
         effective_budget = timeout or self._timeout
-        # When budget is tight (<= 12s), give the entire budget to the primary model
-        if effective_budget <= 12.0:
+        # A single-model decision, or a tight budget (<= 12s), gives the whole
+        # budget to the primary model instead of splitting it across failovers.
+        if primary_only or effective_budget <= 12.0:
             models_to_try = [active_candidate]
         else:
             models_to_try = models_to_try[:2]

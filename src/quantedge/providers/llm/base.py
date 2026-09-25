@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from quantedge.contracts import LLMSignalResponse, ProviderHealth, SignalContext
 
@@ -35,4 +36,19 @@ class BaseLLMProvider(ABC):
     ) -> str:
         """Generate a natural conversational response."""
         raise NotImplementedError(f"{self.provider_name} does not implement generate_chat_reply")
+
+    def decide_trade(
+        self,
+        evidence: dict[str, Any],
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """Decide a trade from pre-verified evidence (optional decision authority).
+
+        Providers that can act as the decision brain return
+        ``{"decision", "conviction", "reason", "invalidation", "brain"}``.
+        Providers that only review need not implement this; the orchestrator
+        checks for the capability and falls back to the deterministic gate.
+        """
+        raise NotImplementedError(f"{self.provider_name} does not implement decide_trade")
 
