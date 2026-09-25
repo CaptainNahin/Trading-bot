@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from quantedge.contracts.enums import (
     AssetClass,
+    ConvictionTier,
     EventImpact,
     EventRiskStatus,
     HealthStatus,
@@ -430,6 +431,15 @@ class ScanCandidate(_Model):
     data_quality_score: float = Field(ge=0.0, le=1.0)
     evidence_agreement_score: float = Field(ge=0.0, le=1.0)
 
+    # Actionability tier. A candidate only exists for A_PLUS/A/B (STAND_ASIDE
+    # symbols are rejections, not candidates). ``position_size_fraction`` is a
+    # relative sizing multiplier, never a win probability; the raw agreement and
+    # score above are reported verbatim so the tier can never inflate them.
+    conviction_tier: ConvictionTier = ConvictionTier.B
+    position_size_fraction: float = Field(default=0.0, ge=0.0, le=1.0)
+    tier_rationale: str = ""
+    upgrade_condition: str = ""
+
     regime: MarketRegime
     reference_price: Decimal
     quote_freshness_ms: int
@@ -574,6 +584,14 @@ class AIDecision(_Model):
     regime: str | None = None
     heuristic_score: float | None = None
     calibrated_probability: float | None = None
+    # Actionability tier for this decision. Present for both SIGNAL (the earned
+    # tier) and NO_TRADE/INSUFFICIENT_DATA (STAND_ASIDE), so the surface can
+    # explain *why* uniformly. ``position_size_fraction`` is a relative sizing
+    # multiplier only, never a win probability.
+    conviction_tier: ConvictionTier | None = None
+    position_size_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
+    tier_rationale: str = ""
+    upgrade_condition: str = ""
     supporting_evidence: list[str] = Field(default_factory=list)
     contradictory_evidence: list[str] = Field(default_factory=list)
     invalidation_conditions: list[str] = Field(default_factory=list)
@@ -687,6 +705,15 @@ class TradeRecommendation(_Model):
     # calibrated probability that the trade wins (Rule 3) -- no calibration model
     # is fitted, so no such number exists -- and a reader must not treat it as one.
     confidence_pct: int = Field(default=0, ge=0, le=100)
+    # Actionability tier and its relative position size. ``conviction_tier``
+    # distinguishes an A+ prime setup from a small B scalp that cleared the same
+    # RR≥1.2 gate; ``position_size_fraction`` (0..1) scales the trader's normal
+    # stake accordingly. It is a sizing multiplier, never a win probability.
+    # ``upgrade_condition`` states plainly what would raise the tier.
+    conviction_tier: ConvictionTier = ConvictionTier.B
+    position_size_fraction: float = Field(default=0.0, ge=0.0, le=1.0)
+    tier_rationale: str = ""
+    upgrade_condition: str = ""
     rationale: str = ""
     # Caveats that qualify the recommendation without withdrawing it: degraded
     # data quality, unfavourable reward:risk. A setup can clear the bar to be

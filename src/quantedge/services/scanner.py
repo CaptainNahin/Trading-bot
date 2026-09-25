@@ -41,6 +41,9 @@ from quantedge.services import (
 from quantedge.services import (
     structure as st,
 )
+from quantedge.services import (
+    tiering,
+)
 from quantedge.services.horizons import normalize_horizon
 from quantedge.symbols import asset_class_for
 
@@ -203,6 +206,26 @@ def run_scan(
     }
     blocking_event_risk = {str(s).upper() for s in gates.get("block_on_event_risk", ["HIGH"])}
     block_unknown_event_risk = bool(gates.get("block_on_unknown_event_risk", False))
+
+    # Conviction tiers turn the old binary agreement cliff into a ladder: A+/A
+    # keep the original selectivity, B emits a small explicitly-low-conviction
+    # scalp for a real-but-partial read instead of rejecting it, and STAND_ASIDE
+    # stays the honest no-edge/conflict/data-fault outcome. When disabled the B
+    # floor is pinned to the A floor so behaviour is identical to the old gates.
+    tiers_cfg = cfg.get("tiers", {})
+    tiers_enabled = bool(tiers_cfg.get("enabled", True))
+    if tiers_enabled:
+        tier_thresholds = tiering.TierThresholds.from_config(tiers_cfg)
+    else:
+        tier_thresholds = tiering.TierThresholds(
+            a_plus_min_agreement=0.75,
+            a_plus_min_score=0.70,
+            a_min_agreement=min_agreement,
+            a_min_score=min_heuristic_score,
+            b_min_agreement=min_agreement,
+            b_min_participation=min_participation,
+            b_min_score=min_heuristic_score,
+        )
 
     # Fall back to the shared registry when no data source was injected. Without
     # this every caller has to remember to pass one, and the one that forgot got
@@ -435,49 +458,13 @@ def run_scan(
         quality_score = exec_quality.quality_score
         agreement_score = mtf_snapshot.alignment_score
 
-        if agreement_score < min_agreement:
-            # Two different failures land here and the message has to say which.
-            # A conflict means the views pointed opposite ways; no conflict means
-            # they simply did not all speak, and reporting that as "timeframes
-            # disagree" describes a fight that never happened -- the reader then
-            # looks for an opposing trend that is not there.
-            if mtf_snapshot.conflicts:
-                cause = "; ".join(mtf_snapshot.conflicts)
-            elif mtf_snapshot.abstaining_roles:
-                cause = (
-                    f"no conflict, but only part of the stack carries a direction; "
-                    f"abstaining: {', '.join(mtf_snapshot.abstaining_roles)}"
-                )
-            else:
-                cause = "no timeframe carries a direction"
-            rejections.append(
-                ScanRejection(
-                    symbol=symbol,
-                    reason_code="WEAK_EVIDENCE_AGREEMENT",
-                    reason=(
-                        f"Multi-timeframe agreement {round(agreement_score, 4)} is below "
-                        f"minimum {min_agreement}: {cause}"
-                    ),
-                    stage="AGREEMENT_GATE",
-                )
-            )
-            continue
-
-        if mtf_snapshot.participation < min_participation:
-            rejections.append(
-                ScanRejection(
-                    symbol=symbol,
-                    reason_code="INSUFFICIENT_TIMEFRAME_PARTICIPATION",
-                    reason=(
-                        f"Only {round(mtf_snapshot.participation, 4)} of the timeframe "
-                        f"stack carries a direction (minimum {min_participation}); "
-                        f"abstaining: {', '.join(mtf_snapshot.abstaining_roles) or 'none'}"
-                    ),
-                    stage="AGREEMENT_GATE",
-                )
-            )
-            continue
-
+        # Step 9 & 10: Conviction tiering. This replaces the old binary
+        # agreement / participation / score cliffs with a ladder. The heuristic
+        # score is computed HERE, before the tier decision, because the tier
+        # depends on it. The raw agreement/participation/score are passed through
+        # unchanged: the tier labels and sizes the setup, it never rescales the
+        # evidence. A lone 0.25-agreement read becomes a small B scalp, not a
+        # rejection and not a disguised full-agreement signal.
         heuristic_score = scoring.composite_score(
             trend=trend_score,
             momentum=momentum_score,
@@ -486,20 +473,56 @@ def run_scan(
             evidence_agreement=agreement_score,
             weights=composite_weights,
         )
-
         skipped_rules = trend.rules_skipped + momentum.rules_skipped + volatility.rules_skipped
 
-        # Step 10: Score Threshold Check
-        if heuristic_score < min_heuristic_score:
+        tier_result = tiering.classify_tier(
+            alignment_score=agreement_score,
+            participation=mtf_snapshot.participation,
+            heuristic_score=heuristic_score,
+            has_conflict=bool(mtf_snapshot.conflicts),
+            direction=direction.value,
+            thresholds=tier_thresholds,
+        )
+
+        if not tier_result.actionable:
+            # No tier earned: a first-class NO_TRADE. The classifier returns the
+            # scanner's existing reason vocabulary; map it back to the stage the
+            # audit doc records so the taxonomy does not drift, and rebuild the
+            # richer diagnostic (which views abstained/conflicted, measured vs
+            # required) the old gate printed.
+            reason_code = tier_result.reason_code or "WEAK_EVIDENCE_AGREEMENT"
+            stage = "SCORE_FILTER" if reason_code == "LOW_HEURISTIC_SCORE" else "AGREEMENT_GATE"
+            if reason_code == "WEAK_EVIDENCE_AGREEMENT":
+                if mtf_snapshot.conflicts:
+                    cause = "; ".join(mtf_snapshot.conflicts)
+                elif mtf_snapshot.abstaining_roles:
+                    cause = (
+                        "no conflict, but only part of the stack carries a direction; "
+                        f"abstaining: {', '.join(mtf_snapshot.abstaining_roles)}"
+                    )
+                else:
+                    cause = "no timeframe carries a direction"
+                reason = (
+                    f"Multi-timeframe agreement {round(agreement_score, 4)} is below the "
+                    f"{tier_thresholds.b_min_agreement} scalp floor: {cause}"
+                )
+            elif reason_code == "INSUFFICIENT_TIMEFRAME_PARTICIPATION":
+                reason = (
+                    f"Only {round(mtf_snapshot.participation, 4)} of the timeframe stack "
+                    f"carries a direction (minimum {tier_thresholds.b_min_participation}); "
+                    f"abstaining: {', '.join(mtf_snapshot.abstaining_roles) or 'none'}"
+                )
+            else:  # LOW_HEURISTIC_SCORE
+                reason = (
+                    f"Heuristic score {round(heuristic_score, 4)} is below the "
+                    f"{tier_thresholds.b_min_score} scalp floor"
+                )
             rejections.append(
                 ScanRejection(
                     symbol=symbol,
-                    reason_code="LOW_HEURISTIC_SCORE",
-                    reason=(
-                        f"Heuristic score {heuristic_score} is below minimum "
-                        f"threshold {min_heuristic_score}"
-                    ),
-                    stage="SCORE_FILTER",
+                    reason_code=reason_code,
+                    reason=reason,
+                    stage=stage,
                 )
             )
             continue
@@ -550,6 +573,10 @@ def run_scan(
             contradictory_evidence=contradictions,
             event_risk=event_risk,
             session_liquidity=_session_liquidity(asset_class_for(symbol)),
+            conviction_tier=tier_result.tier,
+            position_size_fraction=tier_result.size_fraction,
+            tier_rationale=tier_result.rationale,
+            upgrade_condition=tier_result.upgrade_condition,
             scanner_version=SCANNER_VERSION,
         )
         candidates.append(candidate)

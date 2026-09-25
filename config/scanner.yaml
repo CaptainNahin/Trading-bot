@@ -63,6 +63,32 @@ gates:
   # rejection message names which.
   min_timeframe_participation: 0.25
 
+# Conviction tiers. The agreement gate above (0.50) is no longer a binary
+# signal/no-signal cliff: it is the A-tier line. Setups between the scalp floor
+# and that line are still emitted, as an explicitly LOW-CONVICTION B scalp sized
+# to a third, rather than discarded. This RAISES actionability, not accuracy:
+# the raw agreement/participation/score numbers are reported verbatim beside the
+# tier and are never rescaled, RR>=1.2 is still enforced downstream, and
+# STAND_ASIDE remains a first-class outcome for conflict, no-edge, or missing
+# data. A lone execution-timeframe vote scores 0.25 agreement and STAYS 0.25 --
+# it becomes a B scalp, never a disguised full-agreement signal.
+#
+# Position size is a RELATIVE multiplier on the trader's own per-trade risk
+# budget (see services/risk.py SIZE_FRACTION_BY_TIER), never a dollar amount and
+# never a win probability.
+tiers:
+  enabled: true
+  # A+ prime: broad agreement AND strong composite evidence. Full size.
+  a_plus: { min_agreement: 0.75, min_score: 0.70 }
+  # A strong: clears the original agreement gate with full-weight evidence.
+  # min_score mirrors output.min_heuristic_score_to_return by design.
+  a:      { min_agreement: 0.50, min_score: 0.60 }
+  # B scalp: a real but partial directional read. min_agreement is the timeframe
+  # participation floor (a single view), min_score is set above pure noise so a
+  # setup with no directional evidence at all still stands aside.
+  b:      { min_agreement: 0.25, min_participation: 0.25, min_score: 0.35 }
+
+
 # Deterministic evidence weights. Sum of absolute weights is normalized.
 # Renaming any of these to accuracy/probability/win-rate is prohibited.
 weights:

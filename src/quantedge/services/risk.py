@@ -23,12 +23,18 @@ from __future__ import annotations
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from quantedge.contracts import SignalDirection
+from quantedge.contracts import ConvictionTier, SignalDirection
 
 if TYPE_CHECKING:
     from quantedge.contracts import FeatureSnapshot, StructureReport
 
-__all__ = ["MIN_ACCEPTABLE_RR", "RiskLevels", "derive_risk_levels"]
+__all__ = [
+    "MIN_ACCEPTABLE_RR",
+    "SIZE_FRACTION_BY_TIER",
+    "RiskLevels",
+    "derive_risk_levels",
+    "position_size_fraction",
+]
 
 # Stop distance as a multiple of ATR. 1.5 keeps the stop outside ordinary bar
 # noise without sitting so far away that the target becomes unreachable.
@@ -46,6 +52,31 @@ MIN_ACCEPTABLE_RR = Decimal("1.2")
 # Fallback target distance when no opposing structural level exists, expressed
 # as a multiple of the stop distance -- not of price.
 _DEFAULT_TARGET_R = Decimal("2.0")
+
+# Position size as a fraction of the trader's normal per-trade risk budget,
+# keyed by conviction tier. This is a *relative* multiplier, never a dollar
+# amount and never a win probability: a B scalp risks a third of what an A+
+# prime setup does because the directional evidence is a third as broad, not
+# because we can quote its odds. ARMED and STAND_ASIDE size to zero -- there is
+# no open position to size.
+SIZE_FRACTION_BY_TIER: dict[ConvictionTier, float] = {
+    ConvictionTier.A_PLUS: 1.0,
+    ConvictionTier.A: 0.66,
+    ConvictionTier.B: 0.33,
+    ConvictionTier.ARMED: 0.0,
+    ConvictionTier.STAND_ASIDE: 0.0,
+}
+
+
+def position_size_fraction(tier: ConvictionTier) -> float:
+    """Relative position size for a tier (fraction of normal per-trade risk).
+
+    The value is a sizing multiplier only: multiply it by the trader's own
+    per-trade risk budget to get a stake. It is deliberately not a confidence
+    percentage and not a win probability. Any tier without an open position
+    (ARMED, STAND_ASIDE) sizes to zero.
+    """
+    return SIZE_FRACTION_BY_TIER.get(tier, 0.0)
 
 
 class RiskLevels:

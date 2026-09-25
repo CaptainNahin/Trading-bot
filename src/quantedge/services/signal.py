@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any
 from quantedge.contracts import (
     AIDecision,
     AssetClass,
+    ConvictionTier,
     DataQualityReport,
     LLMSignalResponse,
     QualityStatus,
@@ -70,11 +71,24 @@ class NoTradeReason(Exception):
     empty result, which reads as a system failure rather than a decision.
     """
 
-    def __init__(self, status: SignalStatus, reason: str, *, detail: str = "") -> None:
+    def __init__(
+        self,
+        status: SignalStatus,
+        reason: str,
+        *,
+        detail: str = "",
+        watch_plan: str = "",
+    ) -> None:
         super().__init__(reason)
         self.status = status
         self.reason = reason
         self.detail = detail
+        # An optional, purely conditional watch plan built from REAL confirmed
+        # structural levels. It never asserts a direction the evidence does not
+        # support and never quotes odds: it names the price that, if reached,
+        # would give the setup something to work with. Empty when no confirmed
+        # structure exists (never fabricated to fill the space).
+        self.watch_plan = watch_plan
 
 
 # Symbols with a native Binance USDT candle feed. Everything else -- forex, metals,
@@ -124,6 +138,7 @@ def generate_signal_decision(
                 symbol=symbol,
                 horizon=horizon,
                 status=ntr.status,
+                conviction_tier=ConvictionTier.STAND_ASIDE,
                 contradictory_evidence=[ntr.reason] if is_no_trade else [],
                 missing_information=[] if is_no_trade else [ntr.reason],
                 created_at_utc=utc_now(),
@@ -187,6 +202,22 @@ def generate_signal_decision(
     if validated is not None:
         validated = _reconcile_review(validated, candidate.direction, symbol=symbol)
 
+    # Carry the conviction tier the scanner assigned onto the decision. When the
+    # reviewer vetoes (final status is not SIGNAL) there is no open position to
+    # tier or size, so it collapses to STAND_ASIDE at zero size -- the tier field
+    # must never advertise conviction for a trade the system is declining.
+    final_status = validated.status if validated is not None else SignalStatus.SIGNAL
+    if final_status is SignalStatus.SIGNAL:
+        conviction_tier = candidate.conviction_tier
+        size_fraction = candidate.position_size_fraction
+        tier_rationale = candidate.tier_rationale
+        upgrade_condition = candidate.upgrade_condition
+    else:
+        conviction_tier = ConvictionTier.STAND_ASIDE
+        size_fraction = 0.0
+        tier_rationale = "Reviewer vetoed the deterministic setup; standing aside."
+        upgrade_condition = ""
+
     decision = AIDecision(
         decision_id=str(uuid.uuid4()),
         symbol=symbol,
@@ -198,6 +229,10 @@ def generate_signal_decision(
         regime=candidate.regime.value,
         heuristic_score=candidate.heuristic_score,
         calibrated_probability=None,
+        conviction_tier=conviction_tier,
+        position_size_fraction=size_fraction,
+        tier_rationale=tier_rationale,
+        upgrade_condition=upgrade_condition,
         supporting_evidence=(
             validated.supporting_evidence
             if validated is not None
@@ -228,6 +263,7 @@ def generate_trade_recommendation(
     provider_name: str | None = None,
     candle_fetcher: Any = None,
     hold_minutes: int | None = None,
+    include_watch_plan: bool = True,
 ) -> TradeRecommendation:
     """Produce a memory-augmented recommendation, or raise :class:`NoTradeReason`.
 
@@ -292,10 +328,18 @@ def generate_trade_recommendation(
             reasons = list(decision.contradictory_evidence) or list(
                 decision.missing_information
             )
+        # A NO_TRADE is a directional decline, not a data fault, so it earns a
+        # conditional watch plan built from real structure. INSUFFICIENT_DATA does
+        # not: naming levels off a feed we could not read would be the exact
+        # "infrastructure failure dressed as a decision" the honesty rules forbid.
+        watch = ""
+        if include_watch_plan and decision.status is SignalStatus.NO_TRADE:
+            watch = _watch_plan(symbol, horizon, candle_fetcher)
         raise NoTradeReason(
             decision.status,
             (reasons or ["no setup met the configured criteria"])[0],
             detail="; ".join(reasons[1:4]),
+            watch_plan=watch,
         )
     if decision.reference_price is None:
         try:
@@ -383,7 +427,31 @@ def generate_trade_recommendation(
             "Data quality is DEGRADED for this series; the setup stands but the "
             "inputs are not clean."
         )
+    # Short-horizon freshness honesty. The serverless deployment holds no
+    # persistent market-data socket, so a 1m/3m setup is computed on the last
+    # *closed* bar polled over REST -- not a live tick. That bar can be nearly a
+    # full interval old at the moment the setup is read, which on a scalp is a
+    # large fraction of the whole intended move. Disclosed rather than assumed,
+    # and never described as live (Rule: never label delayed data as live).
+    if horizon in {"1m", "3m"}:
+        warnings.append(
+            f"{horizon} scalp: computed from the last CLOSED {horizon} bar polled over "
+            "REST, not a live tick stream. Treat the entry as that bar's close -- the "
+            "bar can be up to one interval old, and slippage on a scalp this short can "
+            "rival the edge itself."
+        )
     warnings.extend(memory_rules)
+
+    # Conviction tier from the deterministic scan, carried onto the trade the
+    # user acts on. Coerced against None so a decision produced without a tier
+    # (e.g. a future non-scan path) still lands on a defined, small-size B rather
+    # than crashing the size-bounded contract field.
+    conviction_tier = decision.conviction_tier or ConvictionTier.B
+    size_fraction = (
+        decision.position_size_fraction
+        if decision.position_size_fraction is not None
+        else 0.0
+    )
 
     return TradeRecommendation(
         recommendation_id=f"rec-{uuid.uuid4().hex[:12]}",
@@ -405,6 +473,10 @@ def generate_trade_recommendation(
         memory_rules_applied=memory_rules,
         heuristic_score=decision.heuristic_score or 0.0,
         confidence_pct=confidence_pct,
+        conviction_tier=conviction_tier,
+        position_size_fraction=size_fraction,
+        tier_rationale=decision.tier_rationale or "",
+        upgrade_condition=decision.upgrade_condition or "",
         rationale=rationale,
         warnings=warnings,
         generated_at_utc=now,
@@ -461,7 +533,7 @@ def generate_best_trade_recommendation(
         # Default representative horizons: prioritize fast, active intraday timeframes over 1h
         horizons = ["5m", "15m", "10m", "1h"]
 
-    scored: list[tuple[float, str, str, str]] = []
+    scored: list[tuple[float, str, str, str, str]] = []
     for hz in horizons:
         try:
             scan_res = run_scan(
@@ -471,7 +543,7 @@ def generate_best_trade_recommendation(
                 candle_fetcher=candle_fetcher,
             )
             scored.extend(
-                (c.heuristic_score, c.symbol, hz, c.direction.value)
+                (c.heuristic_score, c.symbol, hz, c.direction.value, c.conviction_tier.value)
                 for c in scan_res.candidates
             )
         except Exception as exc:
@@ -483,17 +555,28 @@ def generate_best_trade_recommendation(
             "No trade setups found across any symbol or timeframe right now.",
         )
 
-    # Best first, then walk down. When a specific time limit is requested,
-    # prioritize candidates matching that horizon or closest to it.
+    # Best first, then walk down. Conviction tier leads the ranking so an A+ prime
+    # always outranks a B scalp even when their raw scores sit close: "the best
+    # trade" should mean the most-supported one, not merely the highest number.
+    # Score breaks ties within a tier. When a specific time limit is requested,
+    # an exact horizon match takes precedence over everything else.
+    tier_rank = {"A_PLUS": 3, "A": 2, "B": 1, "ARMED": 0, "STAND_ASIDE": 0}
     first_decline: NoTradeReason | None = None
     if time_limit_minutes is not None:
         target_hz = resolve_time_limit(f"{time_limit_minutes}m")
-        ranked = sorted(scored, key=lambda row: (row[2] == target_hz, row[0]), reverse=True)
+        ranked = sorted(
+            scored,
+            key=lambda row: (row[2] == target_hz, tier_rank.get(row[4], 0), row[0]),
+            reverse=True,
+        )
     else:
-        # For default sweep, balance heuristic score with shorter timeframes
-        ranked = sorted(scored, key=lambda row: row[0], reverse=True)
+        ranked = sorted(
+            scored,
+            key=lambda row: (tier_rank.get(row[4], 0), row[0]),
+            reverse=True,
+        )
 
-    for score, symbol, hz, _direction in ranked:
+    for score, symbol, hz, _direction, _tier in ranked:
         try:
             rec = generate_trade_recommendation(
                 symbol=symbol,
@@ -501,6 +584,7 @@ def generate_best_trade_recommendation(
                 provider_name=provider_name,
                 candle_fetcher=candle_fetcher,
                 hold_minutes=time_limit_minutes,
+                include_watch_plan=False,
             )
         except NoTradeReason as exc:
             if first_decline is None:
@@ -509,8 +593,14 @@ def generate_best_trade_recommendation(
 
         if alternatives_out is not None:
             alternatives_out.extend(
-                {"symbol": s, "horizon": h, "direction": d, "heuristic_score": sc}
-                for sc, s, h, d in ranked
+                {
+                    "symbol": s,
+                    "horizon": h,
+                    "direction": d,
+                    "heuristic_score": sc,
+                    "conviction_tier": tv,
+                }
+                for sc, s, h, d, tv in ranked
                 if not (s == symbol and h == hz and sc == score)
             )
         return rec
@@ -585,6 +675,7 @@ def _no_trade_decision(symbol: str, horizon: str, scan: ScanResult) -> AIDecisio
         symbol=symbol,
         horizon=horizon,
         status=status,
+        conviction_tier=ConvictionTier.STAND_ASIDE,
         missing_information=[reason],
         data_quality_status=_quality_status(scan, symbol),
         created_at_utc=utc_now(),
@@ -649,6 +740,69 @@ def _risk_levels_for(
         direction=direction,
         features=features,
         structure=report,
+    )
+
+
+def _watch_plan(symbol: str, horizon: str, candle_fetcher: Any = None) -> str:
+    """An honest, conditional watch line built from confirmed structure only.
+
+    Called when the engine declines a *directional* setup (not a data fault): the
+    decline is real, but the trader still deserves to know what would change it.
+    Uses only :func:`structure.analyze_structure` output -- confirmed swing levels
+    and the structure engine's own deterministic breakout read -- so nothing here
+    asserts a direction the evidence does not carry or quotes a probability.
+    Returns ``""`` when no confirmed structure exists, so the space is never
+    filled with a fabricated level.
+    """
+    from quantedge.contracts import Timeframe
+    from quantedge.providers.registry import get_registry
+    from quantedge.services import indicators as ind
+    from quantedge.services import structure as st
+    from quantedge.services.horizons import horizon_timeframes
+
+    try:
+        tf = Timeframe(horizon_timeframes(horizon)["execution"])
+        if candle_fetcher is not None:
+            series = candle_fetcher(symbol, tf)
+        else:
+            series = get_registry().get_candles(symbol, tf, limit=300)
+        closed = [c for c in series.candles if c.is_closed]
+        if len(closed) < 30:
+            return ""
+        features = ind.compute_features(closed, provider=series.provider)
+        report = st.analyze_structure(closed, atr=features.atr_14)
+    except Exception as exc:  # pragma: no cover - watch plan is best-effort
+        log.info("watch plan unavailable for %s %s: %s", symbol, horizon, exc)
+        return ""
+
+    res = report.nearest_resistance
+    sup = report.nearest_support
+    if res is None and sup is None:
+        return ""
+
+    # The structure engine's own breakout read, when it has one, lets us name the
+    # single level that matters rather than both. It is a deterministic structural
+    # classification, not a forecast, so it may be stated as the trigger.
+    if report.breakout_candidate and report.breakout_direction is not None:
+        up = report.breakout_direction.value == "UP"
+        level = res if up else sup
+        if level is not None:
+            side = "above" if up else "below"
+            return (
+                f"Not armed yet. Structure is coiled {report.breakout_direction.value}: a "
+                f"confirmed {horizon} close {side} {level} would be the trigger that gives a "
+                f"{report.breakout_direction.value} setup something to work with -- it is not "
+                "a position now, so ask again if that level closes."
+            )
+
+    parts: list[str] = []
+    if res is not None:
+        parts.append(f"a confirmed close above {res} opens the upside")
+    if sup is not None:
+        parts.append(f"a confirmed close below {sup} opens the downside")
+    return (
+        "Not armed yet. Watch the edges: " + "; ".join(parts) + ". Neither has "
+        "broken, so there is no position here -- ask again if one closes."
     )
 
 

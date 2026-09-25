@@ -13,6 +13,7 @@ from quantedge.errors import UnsupportedTimeframeError
 __all__ = [
     "TIMEFRAME_SECONDS",
     "AssetClass",
+    "ConvictionTier",
     "EventImpact",
     "EventRiskStatus",
     "HealthStatus",
@@ -146,6 +147,40 @@ class SignalStatus(StrEnum):
 class SignalDirection(StrEnum):
     UP = "UP"
     DOWN = "DOWN"
+
+
+class ConvictionTier(StrEnum):
+    """Actionability tier for a decision.
+
+    Every tier except ``STAND_ASIDE`` is a *tradeable* outcome; the tier only
+    governs how much conviction (and therefore position size) the evidence
+    supports -- it never inflates the underlying agreement/score numbers, which
+    are reported verbatim alongside the tier.
+
+    ``A_PLUS``
+        Prime setup: strong multi-timeframe alignment AND strong composite
+        evidence. Full position size.
+    ``A``
+        Strong setup: timeframes agree with full-weight evidence. Reduced size.
+    ``B``
+        Low-conviction momentum scalp: a real but partial directional read
+        (e.g. only the execution timeframe carries the vote). Small size, and
+        always labelled LOW-CONVICTION -- this is the honest home of the lone
+        0.25-agreement case, never dressed up as full agreement.
+    ``ARMED``
+        No live edge yet, but a specific if-then trigger is defined. Not an
+        open trade; a watch plan.
+    ``STAND_ASIDE``
+        No directional edge, genuine timeframe conflict, a data fault, or HIGH
+        event risk. This is the first-class NO_TRADE / INSUFFICIENT_DATA
+        outcome and is never suppressed to manufacture a signal.
+    """
+
+    A_PLUS = "A_PLUS"
+    A = "A"
+    B = "B"
+    ARMED = "ARMED"
+    STAND_ASIDE = "STAND_ASIDE"
 
 
 class SettlementOutcome(StrEnum):

@@ -651,8 +651,11 @@ def _alternatives_note(alternatives: list[dict[str, Any]]) -> str:
     ups = [a for a in alternatives if a["direction"] == "UP"]
     downs = [a for a in alternatives if a["direction"] != "UP"]
     top = ups[:2] + downs[:2]
+    _board_tier = {"A_PLUS": "A+", "A": "A", "B": "B", "ARMED": "armed", "STAND_ASIDE": "-"}
     listed = ", ".join(
-        f"{a['symbol']} {a['direction']} ({a['horizon']}, {a['heuristic_score']:.2f})"
+        f"{a['symbol']} {a['direction']} "
+        f"({a['horizon']}, {_board_tier.get(a.get('conviction_tier', ''), '')}"
+        f"{'/' if a.get('conviction_tier') else ''}{a['heuristic_score']:.2f})"
         for a in top
     )
     return (
@@ -673,10 +676,16 @@ def _no_trade_reply(symbol: str, minutes: int, exc: Any, note: str = "") -> Chat
     )
     body = f" {exc.reason}." if exc.reason else ""
     detail = f" Contributing factors: {exc.detail}." if exc.detail else ""
+    # A conditional watch plan rides along only on a genuine directional decline
+    # (NO_TRADE), built from real structural levels. It is explicitly not a
+    # position -- it names what would have to happen first -- so it turns "nothing
+    # here" into something actionable without inventing a trade.
+    watch = getattr(exc, "watch_plan", "") or ""
+    watch_block = f"\n\nWhat would change this: {watch}" if watch else ""
     return ChatReply(
         text=(
             f"{headline}{body}{detail} I'd rather tell you there's nothing here "
-            "than hand you a direction the data doesn't support." + note
+            "than hand you a direction the data doesn't support." + watch_block + note
         ),
         intent=Intent.SIGNAL,
         data={
@@ -684,26 +693,55 @@ def _no_trade_reply(symbol: str, minutes: int, exc: Any, note: str = "") -> Chat
             "status": exc.status.value,
             "reason": exc.reason,
             "detail": exc.detail,
+            "watch_plan": watch,
             "time_limit_minutes": minutes,
         },
     )
 
 
+def _tier_label(tier: Any) -> str:
+    """Human label for a conviction tier. Falls back to the raw value."""
+    mapping = {
+        "A_PLUS": "A+ Prime (full size)",
+        "A": "A Strong (reduced size)",
+        "B": "B Scalp (LOW conviction, small size)",
+        "ARMED": "Armed (conditional -- not yet triggered)",
+        "STAND_ASIDE": "Stand aside (no edge)",
+    }
+    val = getattr(tier, "value", tier)
+    return mapping.get(str(val), str(val))
+
+
 def _format_recommendation(rec: Any, minutes: int, expiry: datetime) -> str:
     """The answer the user asked for: direction, time, and the variables."""
     arrow = "UP" if rec.direction.value == "UP" else "DOWN"
+    tier = getattr(rec, "conviction_tier", None)
+    size_frac = getattr(rec, "position_size_fraction", 0.0) or 0.0
     lines = [
         f"{rec.symbol} -- {arrow} for the next {minutes} minutes.",
-        f"  Confidence     {rec.confidence_pct}% ({rec.risk_level.replace('_', ' ').lower()})",
-        "",
-        f"  Enter around   {rec.reference_price}",
-        f"  Expires        {expiry.strftime('%H:%M:%S')} UTC ({minutes} min from now)",
-        f"  Stop           {rec.stop_loss}",
-        f"  Target         {rec.take_profit}",
-        f"  Reward:risk    {rec.risk_reward_ratio:.2f}",
-        f"  Regime         {rec.regime or 'unclassified'}",
-        f"  Venue          {rec.recommended_venue}",
     ]
+    if tier is not None:
+        lines.append(f"  Conviction     {_tier_label(tier)}")
+        # Position size is a RELATIVE multiplier on the trader's own per-trade
+        # risk budget, never a dollar figure and never a win probability. A B
+        # scalp risks a third of what an A+ prime does because the directional
+        # evidence is a third as broad, not because we can quote its odds.
+        lines.append(
+            f"  Position size  x{size_frac:.2f} of your normal per-trade risk"
+        )
+    lines.extend(
+        [
+            f"  Confidence     {rec.confidence_pct}% ({rec.risk_level.replace('_', ' ').lower()})",
+            "",
+            f"  Enter around   {rec.reference_price}",
+            f"  Expires        {expiry.strftime('%H:%M:%S')} UTC ({minutes} min from now)",
+            f"  Stop           {rec.stop_loss}",
+            f"  Target         {rec.take_profit}",
+            f"  Reward:risk    {rec.risk_reward_ratio:.2f}",
+            f"  Regime         {rec.regime or 'unclassified'}",
+            f"  Venue          {rec.recommended_venue}",
+        ]
+    )
     if rec.memory_consulted_count:
         lines.append(f"  Memory         {rec.memory_consulted_count} past outcome(s) consulted")
     if rec.key_lessons_applied:
@@ -717,6 +755,21 @@ def _format_recommendation(rec: Any, minutes: int, expiry: datetime) -> str:
         lines.append("")
         lines.append("This setup has failed this way before:")
         lines.extend(f"  - {rule}" for rule in rec.memory_rules_applied)
+    # What would raise the conviction tier, stated plainly. Only shown when the
+    # setup is below full size -- an A+ prime has nothing to upgrade to.
+    upgrade = getattr(rec, "upgrade_condition", "") or ""
+    if upgrade:
+        lines.append("")
+        lines.append(f"To upgrade this setup: it {upgrade}.")
+    # Caveats that qualify the setup without withdrawing it -- a DEGRADED feed or
+    # the short-horizon freshness disclosure. Memory rules already appear under
+    # their own heading above, so they are filtered out here rather than repeated.
+    _shown = set(getattr(rec, "memory_rules_applied", []))
+    caveats = [w for w in getattr(rec, "warnings", []) if w not in _shown]
+    if caveats:
+        lines.append("")
+        lines.append("Before you take it:")
+        lines.extend(f"  - {c}" for c in caveats)
     lines.extend(
         [
             "",
@@ -1440,7 +1493,8 @@ def _handle_lifecycle() -> ChatReply:
     lines.append("")
     lines.append(
         "Signals are automatically tracked until resolution (TP hit, SL hit, or expiry), "
-        "and lessons learned are autonomously stored in the Memory Bank to improve future accuracy."
+        "and the diagnosed cause of each loss is stored in the Memory Bank so the same "
+        "mistake is flagged the next time the setup recurs."
     )
 
     return ChatReply(
@@ -1545,8 +1599,8 @@ def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
     if "atr" in lower:
         return (
             "**Average True Range (ATR) & Dynamic Risk**:\n\n"
-            "- **Mathematical Levels**: Instead of arbitrary fixed pips or percentages, QuantEdge calculates Stop Loss and Take Profit distances as multiples of ATR (typically 1.5x - 2.0x ATR).\n"
-            "- **Volatility Normalization**: This ensures stops are positioned safely outside normal market noise during high-volatility events.\n\n"
+            "- **Mathematical Levels**: Instead of arbitrary fixed pips or percentages, QuantEdge places the stop at 1.5x ATR (widened to clear the nearest structural level, capped at 2.5x ATR).\n"
+            "- **Volatility Normalization**: This ensures stops are positioned outside normal market noise instead of at a fixed percentage that means different things in quiet and volatile tape.\n\n"
             "Type `gold 10m` to see ATR-calculated stop and target levels in action!"
         )
 
@@ -1562,7 +1616,7 @@ def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
         return (
             "**Institutional Floor Pivots**:\n\n"
             "- **Calculations**: Daily pivot $(H+L+C)/3$ with support ($S_1, S_2, S_3$) and resistance ($R_1, R_2, R_3$) levels.\n"
-            "- **TradingView Feed**: We pull exact institutional pivot targets directly through our TradingView MCP integration to establish high-probability price targets.\n\n"
+            "- **TradingView Feed**: We pull exact institutional pivot levels directly through our TradingView MCP integration to use as commonly-defended price targets.\n\n"
             "Type `tv pivots btc` to view institutional pivot levels for Bitcoin!"
         )
 
@@ -1570,9 +1624,12 @@ def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
     if any(k in lower for k in ("risk", "reward", "r:r", "ratio", "stop loss", "take profit", "money management")):
         return (
             "**Institutional Risk Architecture**:\n\n"
-            "- **Guaranteed $R:R \\ge 1.34$**: Every trade recommendation requires a minimum 1.34:1 (targeting 2:1) Reward-to-Risk ratio.\n"
+            "- **Minimum $R:R \\ge 1.2$**: Every trade recommendation must clear a 1.2:1 "
+            "reward-to-risk floor. A setup below it is declined (NO_TRADE), never stretched to "
+            "hit a nicer ratio -- the target is the opposing structural level, or where none is "
+            "in reach it is flagged as derived from the stop rather than measured.\n"
             "- **Hard Invalidation Gates**: Candidates that fail event-risk checks, data quality thresholds, or multi-timeframe alignment are immediately vetoed (NO_TRADE).\n"
-            "- **Autonomous Lifecycle**: Open trades are actively monitored against live high/low ticks until TP or SL resolution.\n\n"
+            "- **Conviction tiers**: Setups that pass the gates are sized by evidence breadth -- A+ Prime (full), A Strong (reduced), B Scalp (small, low-conviction) -- never by a quoted win probability, which we do not claim.\n\n"
             "Try generating a trade setup with `ETH 15m` or `USDJPY 5m`!"
         )
 

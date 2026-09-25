@@ -37,6 +37,7 @@ from quantedge.contracts.analysis import (
 from quantedge.contracts.enums import (
     TIMEFRAME_SECONDS,
     AssetClass,
+    ConvictionTier,
     EventImpact,
     EventRiskStatus,
     HealthStatus,
@@ -66,6 +67,7 @@ __all__ = [
     "AssetClass",
     "Candle",
     "CandleSeries",
+    "ConvictionTier",
     "DataQualityReport",
     "EconomicEvent",
     "EventImpact",
