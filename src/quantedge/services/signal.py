@@ -180,7 +180,16 @@ def generate_signal_decision(
 
     provider = llm_provider if llm_provider is not None else _default_llm_provider()
     validated = None
-    if provider is not None:
+    # An ARMED read (a dead-chop directional lean or a coiled breakout plan) holds
+    # NO live position: size is 0 and its labels already say "no edge / not yet
+    # triggered". The conservative reviewer exists to veto *live* setups it
+    # distrusts -- there is nothing to veto here, and letting it collapse the
+    # labelled read into STAND_ASIDE would recreate the exact false abstention the
+    # directive removes. So skip the review round-trip for ARMED and return the
+    # honest, explicitly-low-conviction read as the scanner built it. B/A/A+ sized
+    # setups keep the full reviewer veto.
+    skip_review = candidate.conviction_tier is ConvictionTier.ARMED
+    if provider is not None and not skip_review:
         try:
             validated = validate_llm_response(provider.evaluate_signal_context(context), context)
         except (QuantEdgeError, Exception) as exc:
@@ -349,6 +358,61 @@ def generate_trade_recommendation(
                 SignalStatus.INSUFFICIENT_DATA,
                 "no reference price was available from any provider",
             )
+
+    # ARMED read: a size-0 conditional plan -- a dead-chop directional lean or a
+    # primed-but-unbroken breakout. No live position exists, so the RR/target
+    # gate below does not apply; forcing an ARMED read through it raises NO_TRADE
+    # and silences exactly the "give me the lean, just say it's risky" answer the
+    # product must give on every request. Return the direction honestly labelled
+    # as low/no edge with its trigger, and NEVER a fabricated live stop or target
+    # (honesty rule: no invented levels on a trade that does not exist).
+    if decision.conviction_tier is ConvictionTier.ARMED:
+        now = utc_now()
+        ast = _resolve_asset_class(symbol, asset_class)
+        expiry = expiry_for(dur, now)
+        watch = _watch_plan(symbol, horizon, candle_fetcher) if include_watch_plan else ""
+        armed_warnings: list[str] = [
+            "ARMED / NO EDGE: this is a directional lean, not a live setup. Position "
+            "size is 0 -- do not stake a normal position on it. Wait for the trigger "
+            "below (a level breaking, or price reaching a range edge) before treating "
+            "it as a trade.",
+        ]
+        if horizon in {"1m", "3m"}:
+            armed_warnings.append(
+                f"{horizon} scalp: computed from the last CLOSED {horizon} bar polled "
+                "over REST, not a live tick stream; the bar can be up to one interval old."
+            )
+        if watch:
+            armed_warnings.append(watch)
+        return TradeRecommendation(
+            recommendation_id=f"rec-{uuid.uuid4().hex[:12]}",
+            symbol=symbol,
+            asset_class=ast,
+            horizon=horizon,
+            direction=decision.direction,
+            valid_from_utc=now,
+            valid_until_utc=expiry,
+            reference_price=decision.reference_price,
+            stop_loss=None,
+            take_profit=None,
+            risk_reward_ratio=0.0,
+            risk_level="NO_EDGE",
+            recommended_venue=_venue_for(ast),
+            regime=decision.regime,
+            heuristic_score=decision.heuristic_score or 0.0,
+            confidence_pct=round((decision.heuristic_score or 0.0) * 100),
+            conviction_tier=ConvictionTier.ARMED,
+            position_size_fraction=0.0,
+            tier_rationale=decision.tier_rationale or "",
+            upgrade_condition=decision.upgrade_condition or "",
+            rationale=(
+                f"{decision.regime} on the {horizon} horizon, heuristic score "
+                f"{(decision.heuristic_score or 0.0):.2f}. ARMED directional lean "
+                f"({decision.direction.value.lower()}) -- no live position, size 0."
+            ),
+            warnings=armed_warnings,
+            generated_at_utc=now,
+        )
 
     levels = _risk_levels_for(
         symbol, horizon, decision.direction, decision.reference_price, candle_fetcher

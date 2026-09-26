@@ -735,9 +735,27 @@ def _format_recommendation(rec: Any, minutes: int, expiry: datetime) -> str:
             "",
             f"  Enter around   {rec.reference_price}",
             f"  Expires        {expiry.strftime('%H:%M:%S')} UTC ({minutes} min from now)",
-            f"  Stop           {rec.stop_loss}",
-            f"  Target         {rec.take_profit}",
-            f"  Reward:risk    {rec.risk_reward_ratio:.2f}",
+        ]
+    )
+    # An ARMED read holds no live position, so it carries no stop, target or
+    # reward:risk -- naming any would fabricate levels on a trade that does not
+    # exist. Show the honest "no live levels yet" line and lean on the trigger /
+    # upgrade condition below. Every real A+/A/B setup still prints its RR-gated
+    # stop and target here.
+    if rec.stop_loss is None or rec.take_profit is None:
+        lines.append(
+            "  Stop / Target  none yet -- ARMED lean, size 0 (no live position to protect)"
+        )
+    else:
+        lines.extend(
+            [
+                f"  Stop           {rec.stop_loss}",
+                f"  Target         {rec.take_profit}",
+                f"  Reward:risk    {rec.risk_reward_ratio:.2f}",
+            ]
+        )
+    lines.extend(
+        [
             f"  Regime         {rec.regime or 'unclassified'}",
             f"  Venue          {rec.recommended_venue}",
         ]

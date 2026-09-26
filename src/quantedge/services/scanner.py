@@ -45,6 +45,7 @@ from quantedge.services import (
     tiering,
 )
 from quantedge.services.horizons import normalize_horizon
+from quantedge.services.playbooks import select_playbook
 from quantedge.symbols import asset_class_for
 
 if TYPE_CHECKING:
@@ -432,16 +433,24 @@ def run_scan(
             elif struct_exec.structure == "DOWNTREND":
                 direction = SignalDirection.DOWN
 
+        # Step 8b: No aligned trend. Most short-horizon time is not trending, and
+        # the old code rejected every such symbol as NO_CLEAR_DIRECTION -- the root
+        # cause of "the bot returns NO_TRADE most of the time". Instead route the
+        # regime the classifier already established to a non-trend playbook: a
+        # range fade at a confirmed edge, an armed breakout on a coil, or -- in
+        # dead chop -- an explicitly labelled directional lean (size 0). The
+        # playbook only picks direction/tier/labels; stops, targets and the RR
+        # floor stay downstream in derive_risk_levels, so the honesty guarantees
+        # are untouched. It never returns None, so a warmed-up symbol always gets a
+        # read rather than silence.
+        playbook_setup = None
         if direction is None:
-            rejections.append(
-                ScanRejection(
-                    symbol=symbol,
-                    reason_code="NO_CLEAR_DIRECTION",
-                    reason="No clear directional bias established across MTF and structure",
-                    stage="DIRECTION_FILTER",
-                )
+            playbook_setup = select_playbook(
+                regime=regime_report.regime,
+                structure=struct_exec,
+                features=feat_exec,
             )
-            continue
+            direction = playbook_setup.direction
 
         # Step 9: Scoring Components
         # Weighted rule agreement from config/scanner.yaml, not step functions.
@@ -474,6 +483,72 @@ def run_scan(
             weights=composite_weights,
         )
         skipped_rules = trend.rules_skipped + momentum.rules_skipped + volatility.rules_skipped
+
+        # Playbook path: a non-trend regime setup (range fade at a confirmed edge,
+        # an armed breakout on a coil, or -- in dead chop -- an explicitly labelled
+        # directional lean, size 0). It carries its OWN tier/size/labels and
+        # BYPASSES the trend-agreement tier ladder below: alignment is ~0 by
+        # definition when no trend is aligned, so classify_tier would reject an
+        # otherwise-valid fade. select_playbook never returns STAND_ASIDE, so the
+        # only block still applied here is the shared HIGH-event-risk gate. The
+        # real (low) MTF agreement and the component scores are reported verbatim;
+        # heuristic_score carries the playbook's own quality (the composite is a
+        # trend lens, meaningless for a fade). Levels/RR stay downstream in
+        # derive_risk_levels, so the honesty guarantees are untouched.
+        if playbook_setup is not None:
+            pb_event_risk = _event_risk_for(symbol)
+            if pb_event_risk.value.upper() in blocking_event_risk or (
+                block_unknown_event_risk and pb_event_risk == EventRiskStatus.UNKNOWN
+            ):
+                rejections.append(
+                    ScanRejection(
+                        symbol=symbol,
+                        reason_code="EVENT_RISK_BLOCK",
+                        reason=f"Event risk is {pb_event_risk.value} and configuration blocks it",
+                        stage="EVENT_RISK_GATE",
+                    )
+                )
+                continue
+            pb_contradictions = list(regime_report.contradictions) + list(mtf_snapshot.conflicts)
+            pb_contradictions.extend(playbook_setup.contradicting)
+            if skipped_rules:
+                pb_contradictions.append(
+                    "scoring rules not evaluated (inputs unavailable): "
+                    f"{', '.join(sorted(set(skipped_rules)))}"
+                )
+            candidates.append(
+                ScanCandidate(
+                    symbol=symbol,
+                    asset_class=asset_class_for(symbol),
+                    horizon=horizon,
+                    direction=direction,
+                    provider=exec_series.provider or provider,
+                    heuristic_score=playbook_setup.quality_score,
+                    trend_score=trend_score,
+                    momentum_score=momentum_score,
+                    volatility_score=volatility_score,
+                    data_quality_score=quality_score,
+                    evidence_agreement_score=agreement_score,
+                    regime=regime_report.regime,
+                    reference_price=closed_exec[-1].close,
+                    quote_freshness_ms=exec_quality.freshness_ms,
+                    supporting_evidence=(
+                        regime_report.supporting_evidence
+                        + struct_exec.notes
+                        + playbook_setup.supporting
+                    ),
+                    contradictory_evidence=pb_contradictions,
+                    event_risk=pb_event_risk,
+                    session_liquidity=_session_liquidity(asset_class_for(symbol)),
+                    conviction_tier=playbook_setup.tier,
+                    position_size_fraction=playbook_setup.size_fraction,
+                    tier_rationale=f"{playbook_setup.rationale} {playbook_setup.risk_note}".strip(),
+                    upgrade_condition=playbook_setup.upgrade_condition,
+                    playbook=playbook_setup.playbook,
+                    scanner_version=SCANNER_VERSION,
+                )
+            )
+            continue
 
         tier_result = tiering.classify_tier(
             alignment_score=agreement_score,
@@ -577,6 +652,7 @@ def run_scan(
             position_size_fraction=tier_result.size_fraction,
             tier_rationale=tier_result.rationale,
             upgrade_condition=tier_result.upgrade_condition,
+            playbook="trend_follow",
             scanner_version=SCANNER_VERSION,
         )
         candidates.append(candidate)

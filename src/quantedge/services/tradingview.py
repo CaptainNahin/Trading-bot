@@ -481,9 +481,9 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
     import uuid
     from datetime import timedelta
     from decimal import Decimal
-    from quantedge.contracts import SignalDirection, SignalStatus, utc_now
+    from quantedge.contracts import ConvictionTier, SignalDirection, SignalStatus, utc_now
     from quantedge.services.horizons import horizon_for_minutes
-    from quantedge.services.risk import MIN_ACCEPTABLE_RR
+    from quantedge.services.risk import MIN_ACCEPTABLE_RR, SIZE_FRACTION_BY_TIER
     from quantedge.services.signal import NoTradeReason
 
     sym, venue = resolve_tradingview_target(symbol)
@@ -510,20 +510,96 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
     c_net = confirm_vote["net"]
     e_sign = 1 if e_net > 0 else (-1 if e_net < 0 else 0)
     c_sign = 1 if c_net > 0 else (-1 if c_net < 0 else 0)
-    # Multi-timeframe alignment gate: both timeframes lean the same way and the
-    # execution timeframe shows >= 2/4 real indicators agreeing. Otherwise skip.
+
+    def _armed_lean(direction: Any, reason: str, upgrade: str) -> dict[str, Any]:
+        """A size-0 ARMED directional lean built from the SAME real indicators.
+
+        The honest read when there is a direction but no favourable *sized* trade
+        -- timeframes not aligned, agreement too weak, or no pivot structure to
+        place a stop. It replaces the old blanket NO_TRADE at those gates (the
+        false-abstention the directive removes): the product must stay actionable
+        on every request, so it states the lean and labels it low/no edge rather
+        than refusing. No fabricated stop/target -- none exists, so none is
+        invented; the trigger lives in ``upgrade_condition``. A genuine data fault
+        (INSUFFICIENT_DATA) or a hard brain conflict is still a real NO_TRADE.
+        """
+        _now = utc_now()
+        _su = sym.upper()
+        if any(k in _su for k in ("JPY", "EUR", "GBP", "CHF", "CAD", "AUD", "NZD")):
+            _ast = "forex"
+        elif any(k in _su for k in ("XAU", "XAG", "GOLD", "SILVER", "WTI", "BRENT", "OIL")):
+            _ast = "commodity"
+        elif any(k in _su for k in ("SPY", "QQQ", "AAPL", "NVDA", "TSLA", "MSFT", "AMZN", "GOOGL")):
+            _ast = "stock"
+        else:
+            _ast = "crypto"
+        _agree = (abs(e_net) + abs(c_net)) / 8.0
+        _trend = (exec_a.get("market_structure") or {}).get("trend") or direction.value
+        return {
+            "decision_id": f"rec-tv-{uuid.uuid4().hex[:10]}",
+            "symbol": sym,
+            "venue": venue,
+            "asset_class": _ast,
+            "horizon": horizon_for_minutes(minutes),
+            "direction": direction,
+            "now": _now,
+            "expiry": _now + timedelta(minutes=minutes),
+            "reference_price": Decimal(str(price_val)),
+            "stop": None,
+            "target": None,
+            "risk_reward_ratio": 0.0,
+            "agreement": _agree,
+            # Honest, low, bounded: an agreement measure, never a win probability.
+            "confidence": max(45, min(60, 50 + round(_agree * 40))),
+            "regime": _trend,
+            "rationale": (
+                f"ARMED lean ({direction.value}) on {sym} from real {exec_tf}/{confirm_tf} "
+                f"indicators: {reason}. No live position -- size 0, and no stop/target is "
+                "invented for a trade that does not exist."
+            ),
+            "brain": "deterministic",
+            "brain_model": "tv_gate_v2",
+            "glm_invalidation": "",
+            "armed": True,
+            "conviction_tier": ConvictionTier.ARMED,
+            "size_fraction": 0.0,
+            "tier_rationale": (
+                "LOW / NO EDGE: the real indicators do not line up into a sized setup. "
+                "This is a directional lean only -- do not stake a normal position on it."
+            ),
+            "upgrade_condition": upgrade,
+            "warnings": [
+                "ARMED / NO EDGE: directional lean, size 0 (no live position). Wait for "
+                "the trigger -- the timeframes aligning or a level breaking -- before "
+                "treating it as a trade.",
+            ],
+        }
+
+    # Multi-timeframe alignment gate. Previously a hard NO_TRADE whenever the two
+    # timeframes disagreed; that rejected most ranging/chop markets, which is the
+    # exact false-NO_TRADE the directive removes. Now: no aligned+strong sized
+    # setup -> fall back to an honest, explicitly-labelled ARMED lean, never a
+    # refusal (real data faults are still caught upstream as INSUFFICIENT_DATA).
     if e_sign == 0 or c_sign == 0 or e_sign != c_sign:
-        raise NoTradeReason(
-            SignalStatus.NO_TRADE,
-            f"{sym}: {exec_tf}/{confirm_tf} not aligned (no directional edge)",
-            detail=f"exec net {e_net}, confirm net {c_net} from real indicators",
-        )
-    if abs(e_net) < 2:
-        raise NoTradeReason(
-            SignalStatus.NO_TRADE,
-            f"{sym}: execution indicators do not agree strongly enough (net {e_net}/4)",
+        lean_sign = e_sign or c_sign
+        if lean_sign == 0:
+            # Both timeframes truly flat: tiebreak on price vs the central pivot so
+            # the lean is derived from real structure, not defaulted to UP.
+            piv = (exec_a.get("pivots") or {}).get("P")
+            lean_sign = 1 if (piv is None or float(price_val) >= float(piv)) else -1
+        lean_dir = SignalDirection.UP if lean_sign > 0 else SignalDirection.DOWN
+        return _armed_lean(
+            lean_dir,
+            f"{exec_tf} net {e_net}/4 and {confirm_tf} net {c_net}/4 do not point the same way",
+            f"a {exec_tf}/{confirm_tf} agreement in one direction, or a pivot level breaking",
         )
     det_direction = SignalDirection.UP if e_sign > 0 else SignalDirection.DOWN
+    if abs(e_net) < 2:
+        return _armed_lean(
+            det_direction,
+            f"execution indicators lean {det_direction.value} but only net {e_net}/4 agree",
+            "a stronger execution-timeframe agreement (at least 2 of 4 indicators)",
+        )
 
     price = Decimal(str(price_val))
     pivots = exec_a.get("pivots") or {}
@@ -586,20 +662,22 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
     exp = now + timedelta(minutes=minutes)
 
     # Stop/target from REAL pivots only -- no volatility-percent stop, no synthetic
-    # 2R target. If the structure needed to place a stop and a reachable target
-    # isn't there, the setup is declined rather than invented.
+    # 2R target. When the structure to place a stop or a reachable target isn't
+    # there, the direction is still real: fall back to an ARMED lean (size 0, no
+    # invented levels) rather than refusing outright.
     levels = _tv_risk_levels(direction == SignalDirection.UP, price, pivots)
     if levels is None:
-        raise NoTradeReason(
-            SignalStatus.NO_TRADE,
-            f"{sym}: no real pivot structure to place a stop and a reachable target",
+        return _armed_lean(
+            direction,
+            "no real pivot structure yet to place a stop and a reachable target",
+            "a pivot level forming so a real stop and target can be set",
         )
     stop, target, rr, basis = levels
     if rr < MIN_ACCEPTABLE_RR:
-        raise NoTradeReason(
-            SignalStatus.NO_TRADE,
-            f"{sym}: reward:risk {rr:.2f} is below the {MIN_ACCEPTABLE_RR} minimum",
-            detail=f"stop {stop} / target {target} from real pivots ({basis})",
+        return _armed_lean(
+            direction,
+            f"reward:risk {rr:.2f} is below the {MIN_ACCEPTABLE_RR} minimum on real pivots",
+            f"the geometry improving so a reachable target clears reward:risk >= {MIN_ACCEPTABLE_RR}",
         )
 
     # 3. Asset class
@@ -655,6 +733,16 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         "brain": brain,
         "brain_model": brain_model,
         "glm_invalidation": glm_invalidation,
+        # Uniform keys so both renderers treat sized and ARMED reads the same way.
+        # A cleared sized setup is A (broad agreement) or B (thinner but RR-gated).
+        "armed": False,
+        "conviction_tier": ConvictionTier.A if agreement >= 0.75 else ConvictionTier.B,
+        "size_fraction": SIZE_FRACTION_BY_TIER[
+            ConvictionTier.A if agreement >= 0.75 else ConvictionTier.B
+        ],
+        "tier_rationale": "",
+        "upgrade_condition": "",
+        "warnings": [],
     }
 
 
@@ -673,6 +761,10 @@ def _tv_build_decision(d: dict[str, Any]) -> Any:
         regime=d["regime"],
         heuristic_score=d["confidence"] / 100.0,
         calibrated_probability=None,
+        conviction_tier=d.get("conviction_tier"),
+        position_size_fraction=d.get("size_fraction", 0.0),
+        tier_rationale=d.get("tier_rationale", ""),
+        upgrade_condition=d.get("upgrade_condition", ""),
         supporting_evidence=[d["rationale"]],
         contradictory_evidence=[],
         invalidation_conditions=[d["glm_invalidation"]] if d["glm_invalidation"] else [],
@@ -690,7 +782,7 @@ def generate_tradingview_recommendation(symbol: str, minutes: int = 15) -> Any:
     when the core abstains (first-class NO_TRADE / INSUFFICIENT_DATA), and records
     the real brain + model that decided into the lifecycle store.
     """
-    from quantedge.contracts import TradeRecommendation
+    from quantedge.contracts import ConvictionTier, TradeRecommendation
 
     d = _tradingview_decision_core(symbol, minutes)
     rec = TradeRecommendation(
@@ -705,7 +797,11 @@ def generate_tradingview_recommendation(symbol: str, minutes: int = 15) -> Any:
         stop_loss=d["stop"],
         take_profit=d["target"],
         risk_reward_ratio=d["risk_reward_ratio"],
-        risk_level="HIGH_CONVICTION" if d["agreement"] >= 0.75 else "MODERATE_CONVICTION",
+        risk_level=(
+            "NO_EDGE"
+            if d.get("armed")
+            else ("HIGH_CONVICTION" if d["agreement"] >= 0.75 else "MODERATE_CONVICTION")
+        ),
         recommended_venue=f"TradingView ({d['venue']})",
         regime=d["regime"],
         memory_consulted_count=0,
@@ -713,8 +809,12 @@ def generate_tradingview_recommendation(symbol: str, minutes: int = 15) -> Any:
         memory_rules_applied=[],
         heuristic_score=d["confidence"] / 100.0,
         confidence_pct=d["confidence"],
+        conviction_tier=d.get("conviction_tier", ConvictionTier.B),
+        position_size_fraction=d.get("size_fraction", 0.0),
+        tier_rationale=d.get("tier_rationale", ""),
+        upgrade_condition=d.get("upgrade_condition", ""),
         rationale=d["rationale"],
-        warnings=[],
+        warnings=d.get("warnings", []),
         generated_at_utc=d["now"],
     )
     try:

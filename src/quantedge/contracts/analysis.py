@@ -439,6 +439,9 @@ class ScanCandidate(_Model):
     position_size_fraction: float = Field(default=0.0, ge=0.0, le=1.0)
     tier_rationale: str = ""
     upgrade_condition: str = ""
+    # Which playbook chose the direction: "trend_follow" (aligned MTF/structure),
+    # "range_fade", "breakout_arm", or "directional_lean". None on legacy records.
+    playbook: str | None = None
 
     regime: MarketRegime
     reference_price: Decimal
@@ -679,8 +682,13 @@ class TradeRecommendation(_Model):
     valid_from_utc: datetime
     valid_until_utc: datetime
     reference_price: Decimal
-    stop_loss: Decimal
-    take_profit: Decimal
+    # Live risk levels for a setup that holds (or will hold) a real position.
+    # ``None`` ONLY on an ARMED, size-0 read: there is no live position, so a
+    # stop or target would be a fabricated level on a trade that does not exist.
+    # An armed plan carries its trigger in ``upgrade_condition``/``warnings``
+    # instead. Every A+/A/B recommendation still has both, gated by RR>=1.2.
+    stop_loss: Decimal | None = None
+    take_profit: Decimal | None = None
     risk_reward_ratio: float
     risk_level: str = "MODERATE_RISK"
     recommended_venue: str = "Binance"
