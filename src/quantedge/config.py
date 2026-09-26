@@ -118,14 +118,18 @@ class Settings(BaseSettings):
     seekai_base_url: str = "https://seekai.cc/v1"
     seekai_model: str = "glm-5.3-flash"
     seekai_fallback_model: str = "deepseek-v4.1-flash"
-    # How long to wait for a review before abandoning it and shipping the
-    # deterministic candidate unreviewed. The default suits a long-lived
-    # process. A serverless host kills the whole request at its own ceiling,
-    # which is lower -- and a killed request returns nothing at all, where an
-    # abandoned review still returns the deterministic answer. So any deployment
-    # with a wall clock shorter than this must set it below that wall clock,
-    # leaving room for the scan that runs first.
-    llm_timeout_seconds: float = 180.0
+    # How long to wait for a single LLM call before abandoning it and shipping the
+    # deterministic candidate (or a grounded chat fallback) instead. A killed
+    # request returns nothing at all, where an abandoned call still returns the
+    # deterministic answer, so this must stay under the host's wall clock.
+    #
+    # This is now an UPPER BOUND, not a promise: quantedge.deadline caps every LLM
+    # call at min(this, time actually left before the serverless kill), and the
+    # provider further clamps this value to the serverless budget at construction.
+    # The old 180 default -- three times the 60s Vercel ceiling -- could never be
+    # honoured and made the code look like it waited far longer than the host
+    # allowed; 55 keeps the configured default honest and below the wall clock.
+    llm_timeout_seconds: float = 55.0
 
     # ---- Binance (public market data only) ----
     binance_rest_base_url: str = "https://data-api.binance.vision"

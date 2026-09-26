@@ -27,6 +27,12 @@ from quantedge.contracts import (
     ProviderHealth,
     SignalContext,
 )
+from quantedge.deadline import (
+    DEADLINE_MARGIN_SECONDS,
+    MIN_LLM_CALL_SECONDS,
+    SERVERLESS_BUDGET_SECONDS,
+    clamp_to_deadline,
+)
 from quantedge.errors import (
     ProviderAuthError,
     ProviderBadResponseError,
@@ -88,11 +94,16 @@ class SeekAILLMProvider(BaseLLMProvider):
         raw_url = base_url or settings.seekai_base_url or _DEFAULT_BASE_URL
         self._base_url = _normalise_base_url(raw_url)
         raw_timeout = float(settings.llm_timeout_seconds or _TIMEOUT_SECONDS)
-        # Ceiling raised to 45s so a full trade DECISION (measured ~28-40s on the
-        # glm-5.3-flash reasoning model) can complete inside the 60s serverless
-        # function budget. Review/chat/post-mortem still take their own tighter
-        # min(...) caps below, so they are unaffected by this larger ceiling.
-        self._timeout = min(raw_timeout, 45.0)
+        # The per-call ceiling is the whole serverless budget less the response
+        # margin: off a serverless host (CLI/tests) it bounds a runaway call, and
+        # on one it is the largest value the request-deadline clamp in _call_model
+        # can hand back. A configured llm_timeout_seconds larger than the host's
+        # wall clock (the old 180) can no longer be honoured, so it is capped here
+        # rather than silently promising time the host will never give -- this is
+        # what dissolves the "180-second problem". The real bound at run time is
+        # min(this, time actually left before the 60s kill).
+        serverless_ceiling = max(MIN_LLM_CALL_SECONDS, SERVERLESS_BUDGET_SECONDS - DEADLINE_MARGIN_SECONDS)
+        self._timeout = min(raw_timeout, serverless_ceiling)
 
     @property
     def base_url(self) -> str:
@@ -425,11 +436,17 @@ class SeekAILLMProvider(BaseLLMProvider):
 
         messages.append({"role": "user", "content": message})
 
+        # Chat has no preceding scan eating into the request budget, so it may use
+        # almost the whole window. The old 12s cap was the prime cause of the bot
+        # answering with a canned greeting instead of a real reply: the reasoning
+        # model rarely finishes a conversational answer in 12s, timed out, and the
+        # caller fell back. The request-deadline clamp in _call_model still trims
+        # this to whatever wall clock actually remains, so it is safe on-host.
         return self._call_model(
             messages=messages,
             max_tokens=2048,
             temperature=0.6,
-            timeout=min(self._timeout, 12.0),
+            timeout=min(self._timeout, 50.0),
         )
 
     def _call_model(
@@ -465,13 +482,32 @@ class SeekAILLMProvider(BaseLLMProvider):
         last_exc: Exception | None = None
         for idx, model_name in enumerate(models_to_try):
             has_next = idx < len(models_to_try) - 1
+            # Re-clamp to the request deadline on every attempt: after a slow first
+            # model, the wall clock has shrunk, so a failover gets only the time
+            # that is genuinely left -- the cumulative work across failovers can
+            # never push the request past the 60s host kill. Off a serverless host
+            # (no deadline) this returns the full budget and behaviour is unchanged.
+            budget_left = clamp_to_deadline(effective_budget)
+            if budget_left < MIN_LLM_CALL_SECONDS:
+                # Too little wall clock remains to finish a call. Fail fast into the
+                # deterministic / grounded fallback rather than dial a doomed
+                # sub-second timeout or let the host kill us mid-flight.
+                if last_exc is not None:
+                    raise last_exc
+                raise ProviderTimeoutError(self.provider_name, max(budget_left, 0.0))
+            # Reserve half for a possible failover, but only while that still leaves
+            # each attempt enough time to actually return; otherwise spend the whole
+            # remainder on this attempt (the next iteration will fail fast above).
+            if has_next and (budget_left / 2.0) >= MIN_LLM_CALL_SECONDS:
+                call_timeout = budget_left / 2.0
+            else:
+                call_timeout = budget_left
             body = {
                 "model": model_name,
                 "messages": messages,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             }
-            call_timeout = (effective_budget / 2.0) if has_next else effective_budget
             try:
                 with httpx.Client(timeout=call_timeout) as client:
                     response = client.post(endpoint, headers=self._headers(), json=body)

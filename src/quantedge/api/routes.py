@@ -23,6 +23,7 @@ from quantedge.contracts import (
     TradeMemory,
     TradeRecommendation,
 )
+from quantedge.deadline import set_request_deadline
 from quantedge.errors import QuantEdgeError, ValidationError
 from quantedge.logging import get_logger
 from quantedge.providers.registry import get_registry
@@ -140,6 +141,11 @@ def get_quality(symbol: str, timeframe: str = "1m", limit: int = 100) -> DataQua
 @router.post("/scan", response_model=ScanResult)
 def run_scanner(symbols: list[str], horizon: str = "swing") -> ScanResult:
     """Execute candidate scan across requested symbols."""
+    # Anchor the one-per-request wall-clock deadline at the synchronous entry
+    # point (see quantedge.deadline): every LLM call this request makes will be
+    # clamped to the time left before the serverless host kills the request,
+    # rather than each call assuming it has its full budget from a fresh clock.
+    set_request_deadline()
     registry = get_registry()
     return scan.run_scan(symbols, horizon=horizon, registry=registry)
 
@@ -147,6 +153,7 @@ def run_scanner(symbols: list[str], horizon: str = "swing") -> ScanResult:
 @router.post("/signal/evaluate", response_model=AIDecision)
 def evaluate_signal(symbol: str, horizon: str = "swing") -> AIDecision:
     """Generate AI signal decision for a symbol."""
+    set_request_deadline()
     return sig.generate_signal_decision(symbol, horizon=horizon)
 
 
@@ -174,6 +181,7 @@ def get_bot_trade_recommendation(
     A declined setup is a 409 carrying the reason, not an empty 200 -- an empty
     success reads as a system fault rather than a decision not to trade.
     """
+    set_request_deadline()
     try:
         return sig.generate_trade_recommendation(
             symbol, time_limit=time_limit, asset_class=asset_class
@@ -228,6 +236,9 @@ def post_trade_feedback(feedback: TradeFeedback) -> TradeMemory:
     """
     from quantedge.contracts import SettlementOutcome
     from quantedge.services import memory as mem
+
+    # The loss post-mortem may call the AI brain; bound it to this request's clock.
+    set_request_deadline()
 
     # Fetching the holding-period bars enriches the diagnosis; it must never be
     # what stops a loss from being recorded. holding_period_for already degrades
@@ -382,6 +393,7 @@ def post_bot_chat(request: ChatRequest) -> dict[str, Any]:
     deterministic pipeline. A failure here returns the failure -- there is no
     path that substitutes a plausible answer for an unavailable one.
     """
+    set_request_deadline()
     try:
         reply = bot_chat.handle_message(
             request.message,

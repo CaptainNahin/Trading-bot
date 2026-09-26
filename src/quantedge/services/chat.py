@@ -1672,14 +1672,25 @@ def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
     """Generate an intelligent, question-specific response when upstream LLM is experiencing transient delays."""
     lower = user_text.lower().strip()
 
-    # 1. Friendly greetings (checked first with word boundaries)
-    if re.search(r"\b(hi|hello|hey|good\s+morning|good\s+evening|good\s+day|sup|yo|howdy)\b", lower):
-        return (
-            "Hello! I'm **QuantEdge AI**, your dual-brain quantitative trading intelligence assistant.\n\n"
-            "I'm ready to analyze markets, scan technical indicators, or discuss trading strategies. "
-            "How can I help your market analysis today? You can command me with `BTC 15m`, `tv btc`, "
-            "`gold 10m`, or ask me any questions about trading indicators and platform strategies!"
-        )
+    # 1. Friendly greetings -- but ONLY when the message is essentially JUST a
+    # greeting. A greeting-PREFIXED real question ("hey, why are you only giving
+    # DOWN signals?") must fall through to the substantive branches below: a bare
+    # "hey" matching here and returning the canned hello, swallowing the actual
+    # question, was exactly the reported "bot ignores what I asked" bug.
+    greeting_re = r"\b(hi|hello|hey|good\s+morning|good\s+evening|good\s+day|sup|yo|howdy|greetings)\b"
+    if re.search(greeting_re, lower):
+        residue = re.sub(greeting_re, " ", lower)
+        residue = re.sub(r"[^a-z0-9]+", " ", residue).strip()
+        # A "?" is a hard tell the user asked something; so is any real content
+        # left once the greeting words are removed. Keep the pure-greeting reply
+        # only for "hi" / "hello there" / "good morning" and the like.
+        if "?" not in user_text and len(residue.split()) <= 2:
+            return (
+                "Hello! I'm **QuantEdge AI**, your dual-brain quantitative trading intelligence assistant.\n\n"
+                "I'm ready to analyze markets, scan technical indicators, or discuss trading strategies. "
+                "How can I help your market analysis today? You can command me with `BTC 15m`, `tv btc`, "
+                "`gold 10m`, or ask me any questions about trading indicators and platform strategies!"
+            )
 
     # 2. Specific Technical Indicator Inquiries
     if "rsi" in lower:
@@ -1838,6 +1849,7 @@ def _handle_conversation(message: str, state: dict[str, Any]) -> ChatReply:
     else:
         full_system_prompt = _CONVERSATION_SYSTEM_PROMPT
 
+    reason_for_fallback = "AI brain was not consulted"
     try:
         from quantedge.providers.llm import default_llm_provider
 
@@ -1859,7 +1871,17 @@ def _handle_conversation(message: str, state: dict[str, Any]) -> ChatReply:
                     intent=Intent.CONVERSATION,
                     data={"conversation": True, "provider": getattr(provider, "provider_name", "ai")},
                 )
+            # The brain answered with nothing. This path used to fall through in
+            # silence, so a blank reply was indistinguishable from "no brain
+            # configured" and the canned fallback looked like the bot ignoring the
+            # question. Record why so the fallback is never an unexplained mystery.
+            reason_for_fallback = "AI brain returned an empty reply"
+            log.warning("conversational AI returned an empty reply; using grounded fallback")
+        else:
+            reason_for_fallback = "no AI brain provider is configured"
+            log.warning("no conversational AI provider available; using grounded fallback")
     except Exception as exc:
+        reason_for_fallback = f"AI brain unavailable ({type(exc).__name__})"
         log.warning(
             "conversational AI reply unavailable; falling back to grounded response",
             extra={"error": str(exc)},
@@ -1870,6 +1892,6 @@ def _handle_conversation(message: str, state: dict[str, Any]) -> ChatReply:
     return ChatReply(
         text=fallback_text,
         intent=Intent.CONVERSATION,
-        data={"conversation": True, "fallback": True},
+        data={"conversation": True, "fallback": True, "fallback_reason": reason_for_fallback},
     )
 
