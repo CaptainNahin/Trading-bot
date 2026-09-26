@@ -526,6 +526,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         response_model: str | None = None,
         model_verified: bool | None = None,
         latency_ms: float | None = None,
+        fallback_reason: str | None = None,
     ) -> dict[str, Any]:
         """A size-0 ARMED directional lean built from the SAME real indicators.
 
@@ -592,6 +593,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             "llm_response_model": response_model,
             "model_verified": model_verified,
             "llm_latency_ms": latency_ms,
+            "llm_fallback_reason": fallback_reason,
             "armed": True,
             "conviction_tier": ConvictionTier.ARMED,
             "size_fraction": 0.0,
@@ -652,6 +654,12 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
     tv_model_verified: bool | None = None
     tv_latency_ms: float | None = None
     brain_attempted = False
+    # Why a brain-intended decision fell back to the deterministic engine, for
+    # parity with the crypto path (signal.py det_fallback_reason). Null when the
+    # brain led or was never the authority; set to the exception when it was
+    # attempted and failed (timeout, rate limit, bad reply) so prod telemetry
+    # names the cause instead of an opaque DETERMINISTIC_FALLBACK.
+    tv_fallback_reason: str | None = None
 
     # ---- GLM-first: the trained brain decides direction/trade-or-not, and may
     # flip the deterministic lean. Consulted BEFORE the alignment/strength gates
@@ -694,6 +702,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             except NoTradeReason:
                 raise
             except Exception as brain_exc:
+                tv_fallback_reason = f"{type(brain_exc).__name__}: {brain_exc}"[:300]
                 log.info(
                     "AI brain decide_trade unavailable for %s (%s); deterministic decision leads",
                     sym, type(brain_exc).__name__,
@@ -716,6 +725,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
                 f"a {exec_tf}/{confirm_tf} agreement in one direction, or a pivot level breaking",
                 authority=_fb_auth,
                 decision_mode_val=tv_mode,
+                fallback_reason=tv_fallback_reason,
             )
         det_direction = SignalDirection.UP if e_sign > 0 else SignalDirection.DOWN
         if abs(e_net) < 2:
@@ -725,6 +735,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
                 "a stronger execution-timeframe agreement (at least 2 of 4 indicators)",
                 authority=_fb_auth,
                 decision_mode_val=tv_mode,
+                fallback_reason=tv_fallback_reason,
             )
         direction = det_direction
 
@@ -774,6 +785,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
                 except NoTradeReason:
                     raise
                 except Exception as brain_exc:
+                    tv_fallback_reason = f"{type(brain_exc).__name__}: {brain_exc}"[:300]
                     log.info(
                         "AI brain decide_trade unavailable for %s (%s); deterministic decision stands",
                         sym, type(brain_exc).__name__,
@@ -811,7 +823,11 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             "latency_ms": tv_latency_ms,
         }
         if glm_led
-        else {"authority": tv_authority, "decision_mode_val": tv_mode}
+        else {
+            "authority": tv_authority,
+            "decision_mode_val": tv_mode,
+            "fallback_reason": tv_fallback_reason,
+        }
     )
 
     # Stop/target from REAL pivots only -- no volatility-percent stop, no synthetic
@@ -913,6 +929,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         "llm_response_model": tv_resp_model,
         "model_verified": tv_model_verified,
         "llm_latency_ms": tv_latency_ms,
+        "llm_fallback_reason": tv_fallback_reason,
         # Uniform keys so both renderers treat sized and ARMED reads the same way.
         "armed": False,
         "conviction_tier": tier,
@@ -954,6 +971,7 @@ def _tv_build_decision(d: dict[str, Any]) -> Any:
         llm_response_model=d.get("llm_response_model"),
         model_verified=d.get("model_verified"),
         llm_latency_ms=d.get("llm_latency_ms"),
+        llm_fallback_reason=d.get("llm_fallback_reason"),
         scanner_version="tv_gate_v2",
         data_quality_status=None,
         created_at_utc=d["now"],
@@ -1005,6 +1023,7 @@ def generate_tradingview_recommendation(symbol: str, minutes: int = 15) -> Any:
         llm_response_model=d.get("llm_response_model"),
         model_verified=d.get("model_verified"),
         llm_latency_ms=d.get("llm_latency_ms"),
+        llm_fallback_reason=d.get("llm_fallback_reason"),
         generated_at_utc=d["now"],
     )
     try:
