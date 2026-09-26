@@ -627,6 +627,7 @@ def generate_trade_recommendation(
         llm_response_model=decision.llm_response_model,
         model_verified=decision.model_verified,
         llm_latency_ms=decision.llm_latency_ms,
+        llm_fallback_reason=decision.llm_fallback_reason,
         generated_at_utc=now,
     )
 
@@ -1091,6 +1092,7 @@ def _armed_recommendation(
         llm_response_model=decision.llm_response_model,
         model_verified=decision.model_verified,
         llm_latency_ms=decision.llm_latency_ms,
+        llm_fallback_reason=decision.llm_fallback_reason,
         generated_at_utc=now,
     )
 

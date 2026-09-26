@@ -335,7 +335,15 @@ class SeekAILLMProvider(BaseLLMProvider):
             + "\n```"
         )
 
-        budget = timeout if timeout is not None else min(self._timeout, 40.0)
+        # The DECISION brain must get the FULL serverless window, not a 40s cap.
+        # The served model (MiniMax-M2.7) cold-draws at ~40-59s, so the old
+        # min(self._timeout, 40.0) budget guaranteed a timeout -> None ->
+        # DETERMINISTIC_FALLBACK on virtually every fresh call, which is exactly
+        # why signals looked "made by the math brain". Paired with
+        # reasoning_effort="low" below (measured ~29-34s fresh draws), the LLM's
+        # verdict now lands inside the window. The deadline clamp in _call_model
+        # still bounds this to the real time left in the 60s serverless budget.
+        budget = timeout if timeout is not None else max(self._timeout, 58.0)
         text = self._call_model(
             messages=[
                 {"role": "system", "content": system},
@@ -354,11 +362,16 @@ class SeekAILLMProvider(BaseLLMProvider):
             # model still stops naturally well short of it. (The pre-json_object
             # 1200->55s/504 ramble does not recur: json_object gives the model a
             # stop condition it did not have then.) The deadline clamp still bounds
-            # the wall-clock: a slow-tail call is cut at min(40s, time left) and
+            # the wall-clock: a slow-tail call is cut at the time left in the budget and
             # degrades to an honest DETERMINISTIC_FALLBACK, never a 504.
             max_tokens=1500,
             temperature=0.1,
             timeout=budget,
+            # MiniMax honors reasoning_effort (it ignores enable_thinking:false);
+            # "low" cuts a fresh decision draw from ~40-59s to ~29-34s, keeping the
+            # LLM's verdict inside the serverless window instead of timing out into
+            # a deterministic fallback -- the LLM, not the math brain, decides.
+            reasoning_effort="low",
             primary_only=True,
             response_format={"type": "json_object"},
         )

@@ -336,8 +336,46 @@ def parse_intent(message: str) -> ChatIntent:
         return ChatIntent(Intent.LIFECYCLE, symbol=symbol)
 
     # Exclude feedback/questions about problems from being mistaken for a signal request
-    is_meta_question = bool(re.search(r"\b(can'?t|cannot|why|how\s+come|problem|issue|bug|not\s+working|failed\s+to|what\s+markets?|explain|difference)\b", text, re.I))
-    is_explicit_signal_command = bool(re.search(r"\b(give\s+me|send\s+me|generate|scan\s+for|issue|recommend|signal|trade\s+setup)\b", text, re.I))
+    # Feedback and identity/meta questions ABOUT the bot must never be mistaken
+    # for a request to generate a signal -- even when the sentence happens to
+    # contain the word "signal" (e.g. "how is the signal coming?", "which model
+    # made this signal?"). This guard keeps a conversation a conversation. It is
+    # deliberately broad on interrogatives; the explicit-command test below is
+    # correspondingly narrow so a real imperative still reaches the signal path.
+    is_meta_question = bool(
+        re.search(
+            r"\b("
+            r"can'?t|cannot|why|how\s+come|problem|issue|bug|not\s+working|failed\s+to|"
+            r"what\s+markets?|explain|difference|"
+            r"who\s+(are|is|made|built|created|gave|owns?)|"
+            r"which\s+(model|llm|ai|engine|brain|one)|"
+            r"what\s+(model|llm|ai|engine|brain|kind|sort|type)|"
+            r"what\s+are\s+you|what.?s\s+this|"
+            r"are\s+you\s+(using|running|powered|really|actually|sure|an?|the)|"
+            r"how\s+(is|are|does|do\s+you|did|much|good|accurate|reliable)|"
+            r"sandbox|"
+            r"you\s+are\s+(giving|only|doing|just)|"
+            r"do\s+you\s+think"
+            r")\b",
+            text,
+            re.I,
+        )
+    )
+    # An EXPLICIT command to produce a signal -- real imperatives only. The bare
+    # words "signal"/"issue" are intentionally NOT here: they appear in meta
+    # questions too, and letting a bare "signal" token force the signal path is
+    # exactly the misroute bug. A command must actually tell the bot to act.
+    is_explicit_signal_command = bool(
+        re.search(
+            r"\b("
+            r"give\s+me|send\s+me|get\s+me|make\s+me|show\s+me|"
+            r"generate|produce|scan\s+for|recommend|trade\s+setup|"
+            r"(signal|setup|entry|call|trade)\s+(for|on|me)"
+            r")\b",
+            text,
+            re.I,
+        )
+    )
 
     if is_meta_question and not is_explicit_signal_command:
         return ChatIntent(Intent.CONVERSATION, symbol=symbol, minutes=minutes, notes=text)
@@ -809,24 +847,52 @@ def _format_recommendation(rec: Any, minutes: int, expiry: datetime) -> str:
         lines.append("")
         lines.append("Before you take it:")
         lines.extend(f"  - {c}" for c in caveats)
-    # Who actually made this call. In the default llm_first mode GLM 5.3 Flash is
-    # the decision authority; the deterministic engine grounds the levels and is
-    # the fallback when the brain is unreachable. Stated plainly because the user
-    # asked to be told the brain is the one deciding -- and kept truthful by keying
-    # off the live decision mode rather than asserting it unconditionally.
-    from quantedge.config import decision_mode
-
-    if decision_mode() == "llm_first":
+    # Who actually made this call -- kept scrupulously honest by keying off the
+    # RECORDED decision authority rather than asserting a model unconditionally:
+    #   LLM             -> the brain decided and the model we asked for is the
+    #                      model that answered.
+    #   LLM_UNVERIFIED  -> the brain decided but the endpoint served a substitute
+    #                      (e.g. a glm-5.3-flash request answered by MiniMax); we
+    #                      name the model that actually replied, never claim GLM.
+    #   DETERMINISTIC_FALLBACK -> the brain was unreachable/timed out; the
+    #                      deterministic gate decided. We say so and name the cause.
+    #   DETERMINISTIC   -> deterministic-first mode: the engine chose and the LLM
+    #                      only reviewed.
+    #   else            -> the deterministic engine stands alone; make no LLM claim.
+    _auth = getattr(rec, "decision_authority", None)
+    authority = str(getattr(_auth, "value", _auth) or "")
+    served = (
+        getattr(rec, "llm_response_model", None)
+        or getattr(rec, "llm_requested_model", None)
+        or "the LLM brain"
+    )
+    if authority == "LLM":
         brain_line = (
-            "GLM-5.3-Flash made this call -- the direction and whether to trade at "
-            "all -- from the real evidence and levels the deterministic engine "
-            "computed. (If the brain can't be reached, that deterministic gate "
-            "decides instead and the answer says so.)"
+            f"{served} made this call -- the direction and whether to trade at "
+            "all -- reasoning over the real evidence and levels the deterministic "
+            "engine computed."
+        )
+    elif authority == "LLM_UNVERIFIED":
+        brain_line = (
+            "The LLM brain made this call -- the direction and whether to trade "
+            f"at all -- over the evidence the deterministic engine computed. The "
+            f"endpoint served {served} in place of the requested model, so this is "
+            "attributed to the model that actually answered, not to GLM."
+        )
+    elif authority == "DETERMINISTIC_FALLBACK":
+        _reason = getattr(rec, "llm_fallback_reason", None)
+        _why = f" ({_reason})" if _reason else ""
+        brain_line = (
+            "The deterministic engine made this call: the LLM brain wasn't reached "
+            f"in time{_why}, so the deterministic gate decided and grounded the "
+            "levels. No LLM verdict stands behind this direction."
+        )
+    elif authority == "DETERMINISTIC":
+        brain_line = (
+            f"The deterministic engine chose this direction and {served} reviewed it."
         )
     else:
-        brain_line = (
-            "The deterministic engine chose this direction; GLM-5.3-Flash reviewed it."
-        )
+        brain_line = "The deterministic engine chose this direction."
     lines.extend(
         [
             "",

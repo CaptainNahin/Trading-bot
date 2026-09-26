@@ -51,3 +51,33 @@ def test_empty_brain_reply_falls_back(monkeypatch):
     data = reply.data or {}
     assert data.get("fallback") is True
     assert data.get("fallback_reason") == "AI brain returned an empty reply"
+
+
+def test_meta_identity_question_routes_to_conversation():
+    """The image-10 misroute: an identity/meta question that merely CONTAINS the
+    word 'signal' must be a conversation, never a spurious BTCUSDT signal."""
+    q = "Which model are you using? Who are you giving me this sandbox? How is the signal coming?"
+    assert chat_svc.parse_intent(q).intent == chat_svc.Intent.CONVERSATION
+
+
+def test_meta_questions_stay_conversation():
+    for q in (
+        "which llm is this",
+        "what model are you",
+        "are you using deepseek",
+        "how accurate is this bot",
+        "why did you only give down",
+        "you are giving only down, what do you think?",
+    ):
+        assert chat_svc.parse_intent(q).intent == chat_svc.Intent.CONVERSATION, q
+
+
+def test_real_signal_commands_still_route_to_signal():
+    """The guard must not swallow genuine imperatives to produce a signal."""
+    for q in (
+        "Give me a signal USD/JPY for 5 min",
+        "scan BTCUSDT 15m",
+        "generate a setup for ETHUSDT",
+        "send me a trade on gold",
+    ):
+        assert chat_svc.parse_intent(q).intent == chat_svc.Intent.SIGNAL, q
