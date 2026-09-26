@@ -8,19 +8,24 @@ How a message becomes an answer
 2. The matching deterministic service runs -- scanner, risk, memory, settlement.
    Every number in the answer originates there.
 3. The reply is assembled from those numbers by :mod:`quantedge.services.chat`
-   itself. If a reviewer model is configured it *annotates* the answer; it never
-   supplies a level, a direction or a price.
+   itself. In the default ``llm_first`` mode the GLM 5.3 Flash brain is the
+   decision authority -- it chooses the direction and whether to trade at all --
+   but it never supplies a price or a level; entry, stop and target are always
+   grounded from the deterministic engine's real ATR and pivots.
 
-Step 3 is why the model being unreachable degrades the wording and nothing else.
-A chat that fabricates a price when its LLM is down is worse than one that says
-it cannot reach the model, and this ordering makes the latter the only option.
+Step 3 is why the model being unreachable degrades the decision path and nothing
+else: when the brain cannot be reached the deterministic gate decides, so an
+unreachable model falls back to the tested deterministic answer rather than a
+fabricated one. A chat that invents a price when its LLM is down is worse than one
+that decides deterministically and says so, and this ordering makes the latter the
+only option.
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
@@ -570,9 +575,25 @@ def _handle_signal(
         if _is_tradingview_direct(symbol):
             try:
                 rec = generate_tradingview_recommendation(symbol, minutes=minutes_used)
-            except Exception as tv_exc:
+            except NoTradeReason as exc:
+                # The TradingView engine ran and REACHED a decision -- most often
+                # GLM's own NO_TRADE, or a genuine INSUFFICIENT_DATA it raised. Pass
+                # it through with the status it set. Re-wrapping every case as
+                # INSUFFICIENT_DATA produced the contradiction the user saw on
+                # CHFJPY ("I don't have usable data ... the AI brain decided not to
+                # trade") -- a real decision mislabelled as a data gap. The two are
+                # different answers and the honesty seam depends on not blurring them.
+                return _no_trade_reply(symbol, minutes_used, exc, note=assumption_note)
+            except (QuantEdgeError, ValidationError) as tv_exc:
                 log.warning("tradingview recommendation failed for %s: %s", symbol, tv_exc)
-                return _no_trade_reply(symbol, minutes_used, NoTradeReason(SignalStatus.INSUFFICIENT_DATA, str(tv_exc)))
+                return _no_trade_reply(
+                    symbol, minutes_used, NoTradeReason(SignalStatus.INSUFFICIENT_DATA, str(tv_exc))
+                )
+            except Exception as tv_exc:
+                log.exception("tradingview recommendation crashed for %s", symbol)
+                return _no_trade_reply(
+                    symbol, minutes_used, NoTradeReason(SignalStatus.INSUFFICIENT_DATA, str(tv_exc))
+                )
         else:
             try:
                 horizon = horizon_for_minutes(minutes_used)
@@ -788,13 +809,32 @@ def _format_recommendation(rec: Any, minutes: int, expiry: datetime) -> str:
         lines.append("")
         lines.append("Before you take it:")
         lines.extend(f"  - {c}" for c in caveats)
+    # Who actually made this call. In the default llm_first mode GLM 5.3 Flash is
+    # the decision authority; the deterministic engine grounds the levels and is
+    # the fallback when the brain is unreachable. Stated plainly because the user
+    # asked to be told the brain is the one deciding -- and kept truthful by keying
+    # off the live decision mode rather than asserting it unconditionally.
+    from quantedge.config import decision_mode
+
+    if decision_mode() == "llm_first":
+        brain_line = (
+            "GLM-5.3-Flash made this call -- the direction and whether to trade at "
+            "all -- from the real evidence and levels the deterministic engine "
+            "computed. (If the brain can't be reached, that deterministic gate "
+            "decides instead and the answer says so.)"
+        )
+    else:
+        brain_line = (
+            "The deterministic engine chose this direction; GLM-5.3-Flash reviewed it."
+        )
     lines.extend(
         [
             "",
             rec.rationale,
             "",
-            f"Confidence ({rec.confidence_pct}%) is how strongly the deterministic "
-            "evidence backs this setup -- not a calibrated probability that it wins.",
+            brain_line,
+            f"Confidence ({rec.confidence_pct}%) is how strongly the evidence backs "
+            "this setup -- not a calibrated probability that it wins.",
             "",
             "Tell me how it went when it closes and I'll record it -- if it loses "
             "I'll work out why first.",
@@ -806,6 +846,30 @@ def _format_recommendation(rec: Any, minutes: int, expiry: datetime) -> str:
 # ---------------------------------------------------------------------- #
 # outcome reporting: the win/loss asymmetry the user asked for           #
 # ---------------------------------------------------------------------- #
+
+
+def _maybe_decimal(value: Any) -> Decimal | None:
+    """Parse a stored price level into a Decimal, tolerating a missing/None level.
+
+    An ARMED lean carries ``stop_loss``/``take_profit`` of ``None`` -- there is no
+    live position, so quoting a level would fabricate one. ``Decimal(str(None))``
+    raises ``InvalidOperation``, and surfaced through the chat route that became the
+    "invalid operation" message the user saw when reporting a loss on a size-0 lean
+    -- the report was rejected instead of learned from. The whole point of recording
+    a loss is to learn from it, so a missing level must flow through as ``None``; the
+    memory and post-mortem layers already treat ``None`` levels as "not measurable"
+    (they diagnose what they can and skip stop/target-dependent causes) rather than
+    crashing.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() == "none":
+        return None
+    try:
+        return Decimal(text)
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _handle_outcome(parsed: ChatIntent, state: dict[str, Any]) -> ChatReply:
@@ -855,9 +919,12 @@ def _handle_outcome(parsed: ChatIntent, state: dict[str, Any]) -> ChatReply:
     symbol = str(last["symbol"])
     horizon = str(last["horizon"])
     direction = SignalDirection(str(last["direction"]))
-    reference_price = Decimal(str(last["reference_price"]))
-    stop = Decimal(str(last["stop_loss"]))
-    target = Decimal(str(last["take_profit"]))
+    # None-safe: an ARMED lean has no live stop/target, and may not have grounded a
+    # reference price. Parse each defensively so reporting a loss on a size-0 lean
+    # records and diagnoses (as far as the data allows) instead of raising.
+    reference_price = _maybe_decimal(last.get("reference_price"))
+    stop = _maybe_decimal(last.get("stop_loss"))
+    target = _maybe_decimal(last.get("take_profit"))
     entry_time = _parse_utc(last.get("valid_from_utc"))
     expiry = _parse_utc(last.get("expiry_utc")) or _parse_utc(last.get("valid_until_utc"))
 
@@ -1025,24 +1092,35 @@ def _holding_period(
     except QuantEdgeError as exc:
         period.warnings.append(f"settlement candles unavailable: {exc.message}")
         return period
+    except Exception as exc:  # noqa: BLE001 -- diagnosis is enrichment, never fatal
+        # An unknown horizon, a bad symbol map or a registry fault must degrade to
+        # an undiagnosed record, not stop the loss from being saved. The caller
+        # (the /bot/feedback route) reads only the warnings and empty fields.
+        period.warnings.append(f"settlement candles unavailable: {exc}")
+        return period
 
-    closed = [c for c in series.candles if c.is_closed]
-    cutoff = min(expiry, utc_now()) if expiry is not None else utc_now()
+    try:
+        closed = [c for c in series.candles if c.is_closed]
+        cutoff = min(expiry, utc_now()) if expiry is not None else utc_now()
 
-    before_entry = [c for c in closed if c.close_time_utc <= entry_time]
-    period.candles = [c for c in closed if entry_time < c.close_time_utc <= cutoff]
-    up_to_exit = [c for c in closed if c.close_time_utc <= cutoff]
+        before_entry = [c for c in closed if c.close_time_utc <= entry_time]
+        period.candles = [c for c in closed if entry_time < c.close_time_utc <= cutoff]
+        up_to_exit = [c for c in closed if c.close_time_utc <= cutoff]
 
-    if not period.candles:
-        period.warnings.append(
-            "no closed bars cover the holding period yet -- the outcome is recorded, "
-            "the cause is not inferred"
+        if not period.candles:
+            period.warnings.append(
+                "no closed bars cover the holding period yet -- the outcome is recorded, "
+                "the cause is not inferred"
+            )
+
+        period.entry_features, period.entry_structure = _snapshot(
+            before_entry, series.provider, ind, st
         )
-
-    period.entry_features, period.entry_structure = _snapshot(
-        before_entry, series.provider, ind, st
-    )
-    period.exit_features, period.exit_structure = _snapshot(up_to_exit, series.provider, ind, st)
+        period.exit_features, period.exit_structure = _snapshot(
+            up_to_exit, series.provider, ind, st
+        )
+    except Exception as exc:  # noqa: BLE001 -- diagnosis is enrichment, never fatal
+        period.warnings.append(f"holding-period diagnosis incomplete: {exc}")
     return period
 
 
@@ -1315,17 +1393,31 @@ def _handle_status() -> ChatReply:
         note = f" -- {row['message']}" if row.get("message") else ""
         lines.append(f"  {row['provider']:<14} {row['status']}{note}")
 
-    lines.extend(["", "Reviewer model:", ""])
+    lines.extend(["", "Decision brain:", ""])
     note = f" -- {llm_row['message']}" if llm_row.get("message") else ""
     lines.append(f"  {llm_row['provider']:<14} {llm_row['status']}{note}")
-    lines.extend(
-        [
-            "",
-            "Signals are produced by the deterministic scanner. The reviewer model "
-            "annotates them; when it is unreachable the analysis still runs and the "
-            "answer says so rather than substituting anything for it.",
-        ]
-    )
+    from quantedge.config import decision_mode
+
+    if decision_mode() == "llm_first":
+        lines.extend(
+            [
+                "",
+                "GLM-5.3-Flash (via Seek AI) is the decision authority: it decides the "
+                "direction and whether to trade at all. The deterministic scanner "
+                "gathers the real, verified evidence and grounds every price level; "
+                "when the brain is unreachable that deterministic gate decides instead, "
+                "and the answer says so rather than substituting anything for it.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "Signals are produced by the deterministic scanner; GLM-5.3-Flash "
+                "reviews them. When it is unreachable the analysis still runs and the "
+                "answer says so rather than substituting anything for it.",
+            ]
+        )
     return ChatReply(
         text="\n".join(lines),
         intent=Intent.STATUS,
@@ -1559,14 +1651,16 @@ def _handle_help(intent: Intent) -> ChatReply:
 
 _CONVERSATION_SYSTEM_PROMPT = """You are QuantEdge AI, an institutional quantitative trading intelligence assistant.
 You possess a dual-brain architecture:
-1. Deterministic Mathematical Quant Engine: Analyzes market structure (CHoCH, BOS, swing highs/lows), 200 EMA trend, ATR volatility bands, multi-timeframe consensus (1W, 1D, 4H, 1H, 15m), order book depth, and market regimes.
-2. ZXL AI Brain (powered by GLM 5.3 / DeepSeek via Seek AI): Synthesizes market dynamics, reviews quantitative trade candidates, vetoes low-quality setups, and performs deep post-mortem diagnostics on losing trades to extract DO/DON'T rules.
+1. Deterministic Mathematical Quant Engine: Analyzes market structure (CHoCH, BOS, swing highs/lows), 200 EMA trend, ATR volatility bands, multi-timeframe consensus (1W, 1D, 4H, 1H, 15m), order book depth, and market regimes. It grounds every price level (entry, stop, target) from real ATR and pivots.
+2. ZXL AI Brain (GLM 5.3 Flash, with DeepSeek fallback, via Seek AI): This is the DECISION AUTHORITY, not a reviewer. It decides the trade direction and whether to trade at all, reasoning over the deterministic engine's real, verified evidence. It never invents a number -- every price comes from the math engine. When the brain is unreachable, the deterministic gate decides and the answer says so.
 
 You also integrate with:
 - TradingView Institutional Intelligence: Live technical analysis, institutional pivot levels (Pivot, S1-S3, R1-R3), Bollinger squeeze detection, and exchange-wide volume breakout screening across Crypto (Binance), Forex & Commodities (OANDA), and Equities (NASDAQ).
 - Autonomous Closed-Loop Memory Engine: Tracks active trades in real time until Take Profit or Stop Loss resolution, diagnosing losses to store high-leverage rules into memory.
 
 Guidelines for conversation:
+- Answer ANY question the user asks -- general knowledge, casual conversation, coding, explanations, anything -- like a capable, friendly general assistant (in the spirit of ChatGPT). You are fully conversational AND a world-class quantitative trading specialist; you are never only one or the other. Never refuse or deflect a question just because it is off-topic: help with what was asked first, then offer a relevant trading action if one fits.
+- You give a directional read on ANY liquid market the user names -- crypto, forex, metals, indices, equities. When the edge is thin, say so honestly and call it a low-conviction lean rather than refusing; only decline outright when there is genuinely no basis (no data, hard timeframe conflict, or extreme event risk). You never quote or promise a win rate -- if conviction is low, you say the conviction is low.
 - For friendly greetings ("hi", "hello", "hey", "good morning"), respond warmly and professionally, introduce yourself as QuantEdge AI, and invite the user to analyze an asset or ask questions.
 - If asked questions about the platform, bot, trading concepts, market indicators (RSI, EMA, Bollinger, ATR, MTF), or trading strategies, provide clear, articulate, quantitative, and educational explanations.
 - Mention quick actionable commands when relevant: e.g. `BTC 15m` for signals, `tv btc` for TradingView TA & pivots, `tv breakouts` for volume gainers, `active trades` for in-flight tracking, or `status` for system health.
@@ -1703,8 +1797,8 @@ def _generate_contextual_fallback(user_text: str, platform_ctx: str) -> str:
     )):
         return (
             "I am **QuantEdge AI**, an institutional-grade quantitative trading platform featuring a **Dual-Brain Architecture**:\n\n"
-            "1. **Mathematical Quant Engine**: Analyzes 200 EMA trend alignment, ATR volatility bands, multi-timeframe consensus (15m, 1H, 4H, 1D), and order book volume delta.\n"
-            "2. **ZXL AI Brain (GLM-5.3)**: Reviews quantitative setups, filters out low-conviction market noise, and conducts post-mortem diagnostics on resolved trades.\n"
+            "1. **Mathematical Quant Engine**: Analyzes 200 EMA trend alignment, ATR volatility bands, multi-timeframe consensus (15m, 1H, 4H, 1D), and order book volume delta. It grounds every price level from real ATR and pivots.\n"
+            "2. **ZXL AI Brain (GLM-5.3-Flash)**: The decision authority -- it decides the direction and whether to trade at all from the engine's real evidence, and conducts post-mortem diagnostics on resolved trades. It never invents a price; the levels come from the math engine, and if the brain is unreachable the deterministic gate decides.\n"
             "3. **TradingView FastMCP Tools**: Live technical summaries, floor pivots (S1-S3, R1-R3), and volume breakout screeners.\n"
             "4. **Autonomous Memory Engine**: Automatically settles active trades and learns DO/DON'T rules from losses to improve over time.\n\n"
             "Try commanding me with `BTC 15m`, `tv btc`, `gold 10m`, or `active trades`!"

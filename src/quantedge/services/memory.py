@@ -176,19 +176,36 @@ def record_trade_outcome_and_analyze(
             symbol=symbol, horizon=horizon, regime=reg_enum, pattern=pattern
         )
     elif out_enum is SettlementOutcome.LOSS:
-        root_cause, lessons, do_rules, dont_rules, mortem = _loss_record(
-            symbol=symbol,
-            direction=dir_enum,
-            reference_price=reference_price,
-            holding_candles=holding_candles,
-            entry_time=entry_time,
-            stop=stop,
-            target=target,
-            entry_structure=entry_structure,
-            exit_structure=exit_structure,
-            entry_features=entry_features,
-            exit_features=exit_features,
-        )
+        try:
+            root_cause, lessons, do_rules, dont_rules, mortem = _loss_record(
+                symbol=symbol,
+                direction=dir_enum,
+                reference_price=reference_price,
+                holding_candles=holding_candles,
+                entry_time=entry_time,
+                stop=stop,
+                target=target,
+                entry_structure=entry_structure,
+                exit_structure=exit_structure,
+                entry_features=entry_features,
+                exit_features=exit_features,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Diagnosing the loss is enrichment; recording that it happened is the
+            # point. A crash in the deterministic measurement must not discard the
+            # trader's report -- degrade to an undiagnosed record and say so,
+            # rather than losing the loss or assigning a presumed cause.
+            log.warning(
+                "loss diagnosis failed; recording undiagnosed",
+                extra={"symbol": symbol, "error": str(exc)},
+            )
+            root_cause = (
+                f"{symbol} settled LOSS. The cause could not be determined: the "
+                "diagnosis failed unexpectedly, so no measurement of the holding "
+                "period was possible. Recorded as undiagnosed rather than assigned "
+                "a presumed cause."
+            )
+            lessons, do_rules, dont_rules, mortem = [], [], [], None
         # Augment with AI Brain post-mortem if an LLM reviewer is configured and loss was diagnosable
         if mortem is not None and trigger_ai_postmortem:
             try:

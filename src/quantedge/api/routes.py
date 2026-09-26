@@ -229,34 +229,62 @@ def post_trade_feedback(feedback: TradeFeedback) -> TradeMemory:
     from quantedge.contracts import SettlementOutcome
     from quantedge.services import memory as mem
 
-    period = bot_chat.holding_period_for(
-        symbol=feedback.symbol,
-        horizon=feedback.horizon,
-        entry_time=feedback.entry_time_utc,
-        expiry=feedback.expiry_utc,
-    )
+    # Fetching the holding-period bars enriches the diagnosis; it must never be
+    # what stops a loss from being recorded. holding_period_for already degrades
+    # internally, but a defensive guard here keeps that guarantee even if a future
+    # change reintroduces a raising path -- an undiagnosed record beats a lost one.
+    try:
+        period = bot_chat.holding_period_for(
+            symbol=feedback.symbol,
+            horizon=feedback.horizon,
+            entry_time=feedback.entry_time_utc,
+            expiry=feedback.expiry_utc,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "holding period lookup failed; recording feedback undiagnosed",
+            extra={"symbol": feedback.symbol, "error": str(exc)},
+        )
+        period = bot_chat._HoldingPeriod()
 
-    return mem.record_trade_outcome_and_analyze(
-        feedback.signal_id,
-        SettlementOutcome(feedback.outcome.upper()),
-        symbol=feedback.symbol,
-        asset_class=feedback.asset_class,
-        horizon=feedback.horizon,
-        regime=feedback.regime,
-        pattern=feedback.pattern,
-        direction=feedback.direction.upper() if feedback.direction else None,
-        reference_price=feedback.reference_price,
-        exit_price=feedback.exit_price,
-        stop=feedback.stop,
-        target=feedback.target,
-        holding_candles=period.candles,
-        entry_time=feedback.entry_time_utc,
-        entry_structure=period.entry_structure,
-        exit_structure=period.exit_structure,
-        entry_features=period.entry_features,
-        exit_features=period.exit_features,
-        user_notes=feedback.user_notes,
-    )
+    try:
+        return mem.record_trade_outcome_and_analyze(
+            feedback.signal_id,
+            SettlementOutcome(feedback.outcome.upper()),
+            symbol=feedback.symbol,
+            asset_class=feedback.asset_class,
+            horizon=feedback.horizon,
+            regime=feedback.regime,
+            pattern=feedback.pattern,
+            direction=feedback.direction.upper() if feedback.direction else None,
+            reference_price=feedback.reference_price,
+            exit_price=feedback.exit_price,
+            stop=feedback.stop,
+            target=feedback.target,
+            holding_candles=period.candles,
+            entry_time=feedback.entry_time_utc,
+            entry_structure=period.entry_structure,
+            exit_structure=period.exit_structure,
+            entry_features=period.entry_features,
+            exit_features=period.exit_features,
+            user_notes=feedback.user_notes,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+    except QuantEdgeError as exc:
+        raise HTTPException(status_code=503, detail=f"{exc.code}: {exc.message}") from exc
+    except Exception as exc:  # noqa: BLE001
+        # Persistence genuinely failed (storage down, etc.). Do not fake a success:
+        # tell the caller honestly that nothing was saved, with a clear message
+        # rather than a bare, unexplained 500.
+        log.exception("recording trade feedback failed for %s", feedback.symbol)
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The trade outcome could not be saved to memory right now "
+                f"(storage error: {exc}). Nothing was recorded -- please retry."
+            ),
+        ) from exc
 
 
 @router.get("/bot/memories", response_model=list[TradeMemory])
