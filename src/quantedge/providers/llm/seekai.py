@@ -524,16 +524,29 @@ class SeekAILLMProvider(BaseLLMProvider):
         messages.append({"role": "user", "content": message})
 
         # Chat has no preceding scan eating into the request budget, so it may use
-        # almost the whole window. The old 12s cap was the prime cause of the bot
-        # answering with a canned greeting instead of a real reply: the reasoning
-        # model rarely finishes a conversational answer in 12s, timed out, and the
-        # caller fell back. The request-deadline clamp in _call_model still trims
-        # this to whatever wall clock actually remains, so it is safe on-host.
+        # almost the whole window. Three settings keep the reply both real and fast:
+        #  * primary_only -- the account key authorises only the primary model
+        #    (the other candidates 401/404), so splitting the budget in half for a
+        #    doomed failover just halved the primary's time and then burned a
+        #    rate-limit slot on a dead model. Give the whole window to the one
+        #    model that answers.
+        #  * timeout=58 (not min(_timeout,50)) -- the reasoning endpoint's latency
+        #    is nondeterministic (measured 1.8s cache-hit .. 58.7s fresh on the
+        #    same prompt), so a 45s cap needlessly discarded 46-54s draws as
+        #    timeouts. Chat, unlike a decision, has the whole request window to
+        #    itself; clamp_to_deadline below still trims this to the ~54s that
+        #    genuinely remain under the serverless kill, so it is safe on-host and
+        #    58 is only the local (no-deadline) ceiling.
+        #  * max_tokens=900 -- the reasoning model emits a <think> block first
+        #    (stripped below); the conversation system prompt tells it to reason
+        #    briefly, so ~900 tokens is ample for a full answer and caps output.
         return self._call_model(
             messages=messages,
-            max_tokens=2048,
+            max_tokens=900,
             temperature=0.6,
-            timeout=min(self._timeout, 50.0),
+            timeout=58.0,
+            primary_only=True,
+            reasoning_effort="low",
         )
 
     def _call_model(
@@ -545,6 +558,7 @@ class SeekAILLMProvider(BaseLLMProvider):
         timeout: float | None = None,
         primary_only: bool = False,
         response_format: dict[str, Any] | None = None,
+        reasoning_effort: str | None = None,
     ) -> str:
         """Call Seek AI chat completion endpoint with automatic fallback on quota exhaustion.
 
@@ -604,6 +618,15 @@ class SeekAILLMProvider(BaseLLMProvider):
             # (the decide/review prompts already contain it).
             if response_format is not None:
                 body["response_format"] = response_format
+            # Ask the reasoning endpoint to spend less wall clock deliberating.
+            # MiniMax ignores enable_thinking/thinking:disabled, but it DOES honour
+            # reasoning_effort: measured ~29-34s fresh draws at "low" vs 40-59s
+            # with no hint, on the same prompt -- the difference between fitting
+            # the serverless window and timing out into the canned fallback. The
+            # <think> block is still emitted (and stripped below); this only makes
+            # it shorter, so it never truncates the visible answer.
+            if reasoning_effort is not None:
+                body["reasoning_effort"] = reasoning_effort
             try:
                 call_started = time.monotonic()
                 with httpx.Client(timeout=call_timeout) as client:
