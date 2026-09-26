@@ -617,6 +617,11 @@ class AIDecision(_Model):
     llm_response_model: str | None = None
     model_verified: bool | None = None
     llm_latency_ms: float | None = None
+    # When ``decision_authority`` is DETERMINISTIC_FALLBACK, the honest reason the
+    # brain did not decide (exception type + message: timeout, rate limit, bad
+    # response, no key). Surfaces a hidden infra fault instead of letting it read
+    # as a clean no-edge deterministic call. None when the brain did decide.
+    llm_fallback_reason: str | None = None
     strategy_version: str | None = None
     scanner_version: str | None = None
     data_quality_status: QualityStatus | None = None
@@ -757,6 +762,7 @@ class TradeRecommendation(_Model):
     llm_response_model: str | None = None
     model_verified: bool | None = None
     llm_latency_ms: float | None = None
+    llm_fallback_reason: str | None = None
     generated_at_utc: datetime = Field(default_factory=utc_now)
 
 

@@ -206,12 +206,14 @@ def generate_signal_decision(
     # result must then be labelled a fallback, never read as the brain's own call.
     det_authority = "DETERMINISTIC"
     det_mode = decision_mode()
+    det_fallback_reason: str | None = None
     if (
         allow_brain
         and det_mode == "llm_first"
         and provider is not None
         and callable(getattr(provider, "decide_trade", None))
     ):
+        _brain_diag: dict[str, Any] = {}
         brain_decision = _glm_decide_crypto(
             provider,
             candidate,
@@ -220,6 +222,7 @@ def generate_signal_decision(
             horizon=horizon,
             scan=scan,
             minutes=horizon_minutes(horizon),
+            diag=_brain_diag,
         )
         if brain_decision is not None:
             _persist(repo, brain_decision, context=context)
@@ -227,8 +230,10 @@ def generate_signal_decision(
         # The brain was the intended decision authority for this symbol but did not
         # return a usable verdict within the request budget (timeout, rate limit,
         # missing key, or malformed output). Mark the deterministic decision below
-        # as a fallback so nothing downstream attributes it to the AI brain.
+        # as a fallback so nothing downstream attributes it to the AI brain, and
+        # carry the honest reason so an infra fault is visible, not hidden.
         det_authority = "DETERMINISTIC_FALLBACK"
+        det_fallback_reason = _brain_diag.get("fallback_reason")
 
     validated = None
     # An ARMED read (a dead-chop directional lean or a coiled breakout plan) holds
@@ -309,6 +314,7 @@ def generate_signal_decision(
         llm_model=provider.model_name if provider is not None and validated else None,
         decision_authority=det_authority,
         decision_mode=det_mode,
+        llm_fallback_reason=det_fallback_reason,
         scanner_version=candidate.scanner_version,
         data_quality_status=_quality_status(scan, symbol),
         created_at_utc=utc_now(),
@@ -861,6 +867,7 @@ def _glm_decide_crypto(
     horizon: str,
     scan: Any,
     minutes: int,
+    diag: dict[str, Any] | None = None,
 ) -> AIDecision | None:
     """Let the brain decide this crypto symbol; return the AIDecision, or None.
 
@@ -870,19 +877,29 @@ def _glm_decide_crypto(
     an honest STAND_ASIDE ``NO_TRADE`` when it declines, or a ``SIGNAL`` carrying
     the direction it chose (which may flip the deterministic lean). The brain never
     names a price; the direction it returns is grounded into real levels downstream.
+
+    When ``diag`` is provided and the brain does not return a usable verdict, the
+    reason (exception type + message, or why it was skipped) is written to
+    ``diag["fallback_reason"]`` so the caller can surface it -- an infra fault must
+    never masquerade as a clean deterministic no-edge call.
     """
     decide = getattr(provider, "decide_trade", None)
     if not callable(decide):
+        if diag is not None:
+            diag["fallback_reason"] = "provider exposes no decide_trade()"
         return None
     evidence = _build_crypto_evidence(candidate, context, minutes)
     try:
         verdict = decide(evidence)
     except Exception as exc:
-        log.info(
+        reason = f"{type(exc).__name__}: {exc}"
+        log.warning(
             "AI brain decide_trade unavailable for %s (%s); deterministic reviewer decides",
             symbol,
-            type(exc).__name__,
+            reason,
         )
+        if diag is not None:
+            diag["fallback_reason"] = reason
         return None
 
     gd = str(verdict.get("decision", "")).upper()
