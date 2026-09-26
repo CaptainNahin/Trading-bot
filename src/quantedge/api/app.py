@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from quantedge.api.routes import router
@@ -108,8 +108,18 @@ def create_app() -> FastAPI:
         request: Request,
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
-        challenge = Response(
-            "Unauthorized", status_code=401, headers={"WWW-Authenticate": "Basic"}
+        # A failed or absent credential returns a plain 401 with NO
+        # ``WWW-Authenticate: Basic`` header. That header is the one thing that
+        # makes a browser render its own native Basic-auth dialog, which was
+        # appearing as a second, redundant password prompt layered on top of the
+        # app's own workspace login (the browser fires it for un-exempt requests
+        # like /favicon.ico). Without the header, an unauthenticated API call is
+        # simply a 401 that the frontend handles itself -- it shows the workspace
+        # login and replays the request with the Authorization header it already
+        # manages. Single sign-in; the API is exactly as protected as before.
+        challenge = JSONResponse(
+            {"detail": "Authentication required. Sign in through the workspace."},
+            status_code=401,
         )
         # The public shell is viewable before login. API calls remain protected,
         # so this changes only where authentication is requested, not what the
