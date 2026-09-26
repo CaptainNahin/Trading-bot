@@ -353,6 +353,7 @@ class SeekAILLMProvider(BaseLLMProvider):
             temperature=0.1,
             timeout=budget,
             primary_only=True,
+            response_format={"type": "json_object"},
         )
         payload = extract_json_object(text, provider=self.provider_name)
 
@@ -536,6 +537,7 @@ class SeekAILLMProvider(BaseLLMProvider):
         temperature: float = _TEMPERATURE,
         timeout: float | None = None,
         primary_only: bool = False,
+        response_format: dict[str, Any] | None = None,
     ) -> str:
         """Call Seek AI chat completion endpoint with automatic fallback on quota exhaustion.
 
@@ -587,6 +589,14 @@ class SeekAILLMProvider(BaseLLMProvider):
                 "temperature": temperature,
                 "max_tokens": max_tokens,
             }
+            # Force a bare JSON object when the caller needs a machine-parseable
+            # verdict. MiniMax/GLM reasoning models otherwise sometimes spend the
+            # whole token budget on prose or <think> and never emit the JSON, which
+            # surfaced on prod as "model reply contained no JSON object". OpenAI-
+            # compatible json_object mode requires the word "json" in the prompt
+            # (the decide/review prompts already contain it).
+            if response_format is not None:
+                body["response_format"] = response_format
             try:
                 call_started = time.monotonic()
                 with httpx.Client(timeout=call_timeout) as client:
