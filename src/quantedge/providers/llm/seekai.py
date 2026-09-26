@@ -17,6 +17,7 @@ import json
 import time
 from decimal import Decimal
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -62,12 +63,55 @@ _HEALTH_MAX_TOKENS = 64
 
 
 def _normalise_base_url(url: str) -> str:
-    """Ensure base URL has no trailing slash and points to /v1."""
+    """Trim a trailing slash; append ``/v1`` only for a bare host with no path.
+
+    seekai.cc's OpenAI-compatible API lives under ``/v1``, so a bare
+    ``https://seekai.cc`` is completed to ``https://seekai.cc/v1``. Other
+    OpenAI-compatible GLM endpoints version their path differently -- Z.ai's real
+    GLM API is ``https://api.z.ai/api/paas/v4`` -- so any URL that already carries
+    a path is left exactly as given. The old logic force-appended ``/v1`` to every
+    URL, which turned the Z.ai base into ``.../v4/v1`` and made pointing at a
+    genuine GLM endpoint impossible.
+    """
     url = url.rstrip("/")
-    if not url.endswith("/v1") and not url.endswith("/v1/"):
-        # If user passed https://seekai.cc, append /v1
+    path = urlsplit(url).path
+    if path in ("", "/"):
+        # Bare host (no path): complete it to the seekai.cc default of /v1.
         url = f"{url}/v1"
     return url.rstrip("/")
+
+
+def _leading_alpha_token(model_id: str) -> str:
+    """The leading alphabetic run of a model id, vendor prefix stripped.
+
+    ``MiniMaxAI/MiniMax-M2.7`` -> ``minimax``; ``glm-5.3-flash`` -> ``glm``;
+    ``deepseek-v4.1-flash`` -> ``deepseek``. This is the coarse family token used
+    to tell whether the model that answered is the family we asked for.
+    """
+    tail = model_id.lower().rsplit("/", 1)[-1]
+    out: list[str] = []
+    for ch in tail:
+        if ch.isalpha():
+            out.append(ch)
+        else:
+            break
+    return "".join(out)
+
+
+def _same_model_family(requested: str | None, served: str | None) -> bool | None:
+    """Whether the served model is plausibly the model we requested.
+
+    Returns ``None`` when either id is missing (nothing to compare). Providers
+    that honour the request echo a model id from the same family; an aggregator
+    that silently routes elsewhere -- e.g. seekai.cc answering a ``glm-5.3-flash``
+    request with ``MiniMaxAI/MiniMax-M2.7`` -- is caught here, so a decision is
+    never attributed to a model that did not actually make it. A config/env match
+    on the requested name is NOT proof of identity; this compares against the
+    server's own reported model id.
+    """
+    if not requested or not served:
+        return None
+    return _leading_alpha_token(requested) == _leading_alpha_token(served)
 
 
 class SeekAILLMProvider(BaseLLMProvider):
@@ -104,6 +148,15 @@ class SeekAILLMProvider(BaseLLMProvider):
         # min(this, time actually left before the 60s kill).
         serverless_ceiling = max(MIN_LLM_CALL_SECONDS, SERVERLESS_BUDGET_SECONDS - DEADLINE_MARGIN_SECONDS)
         self._timeout = min(raw_timeout, serverless_ceiling)
+        # Telemetry of the most recent successful completion, so a caller can prove
+        # WHICH model actually answered rather than trusting config. Populated only
+        # on the success path of ``_call_model`` and read immediately by the caller
+        # in the same synchronous request, so there is no cross-request staleness:
+        #   requested_model -- the model we asked for first (the active candidate)
+        #   resolved_model  -- the candidate that actually returned (after any failover)
+        #   response_model  -- the ``model`` field the server put in its own payload
+        #   latency_ms      -- wall-clock of the HTTP round trip that answered
+        self._last_call_meta: dict[str, Any] = {}
 
     @property
     def base_url(self) -> str:
@@ -267,8 +320,10 @@ class SeekAILLMProvider(BaseLLMProvider):
             "self-contradictory, or extreme event risk makes either direction a coin "
             "toss. Do NOT invent numbers, prices, or levels beyond those provided. "
             "Trade only WITH the higher timeframe, never against a strong one.\n"
-            "Reply with exactly ONE raw JSON object and nothing else -- no markdown, "
-            "no prose, no code fence:\n"
+            "Decide directly and answer IMMEDIATELY. Do NOT emit any reasoning, "
+            "analysis, planning, deliberation, or <think> blocks before or after the "
+            "answer -- reason internally and keep it brief. Reply with exactly ONE raw "
+            "JSON object and nothing else -- no markdown, no prose, no code fence:\n"
             '{"decision":"UP|DOWN|NO_TRADE","conviction":0.0-1.0,'
             '"reason":"one sentence citing the specific evidence",'
             '"invalidation":"the level or condition that would prove this wrong"}'
@@ -286,7 +341,15 @@ class SeekAILLMProvider(BaseLLMProvider):
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            max_tokens=1200,
+            # A bounded UP/DOWN/NO_TRADE verdict plus a one-sentence reason needs
+            # few output tokens. The old 1200 let a reasoning model spend the whole
+            # serverless window emitting <think> tokens -- measured >55s locally and
+            # a Cloudflare 504 at ~61s upstream, i.e. it could never return inside
+            # the 60s host wall. Capping output (with the no-reasoning directive
+            # above) brings the same verdict back in ~25-35s, which fits. Full
+            # deliberation, if wanted, belongs on the decoupled precompute path,
+            # not on the synchronous request.
+            max_tokens=500,
             temperature=0.1,
             timeout=budget,
             primary_only=True,
@@ -306,12 +369,28 @@ class SeekAILLMProvider(BaseLLMProvider):
             conviction = 0.0
         conviction = max(0.0, min(1.0, conviction))
 
+        # Merge the completion telemetry recorded by _call_model on this same call.
+        # response_model is the server-declared model id -- the one piece of proof
+        # that the model we intended is the model that actually answered, which an
+        # env-var comparison alone cannot establish.
+        meta = dict(self._last_call_meta)
         return {
             "decision": decision,
             "conviction": conviction,
             "reason": str(payload.get("reason") or "").strip()[:400],
             "invalidation": str(payload.get("invalidation") or "").strip()[:400],
             "brain": SeekAILLMProvider._ACTIVE_MODEL or self.model_name,
+            "requested_model": meta.get("requested_model"),
+            "resolved_model": meta.get("resolved_model"),
+            "response_model": meta.get("response_model"),
+            "latency_ms": meta.get("latency_ms"),
+            # True/False when both ids are known: does the server's own model id
+            # belong to the family we asked for? False here means the endpoint
+            # substituted a different model (e.g. a glm-5.3-flash request answered
+            # by MiniMax) and the decision must NOT be attributed to GLM.
+            "model_verified": _same_model_family(
+                meta.get("requested_model"), meta.get("response_model")
+            ),
         }
 
     def analyze_loss_postmortem(
@@ -509,8 +588,10 @@ class SeekAILLMProvider(BaseLLMProvider):
                 "max_tokens": max_tokens,
             }
             try:
+                call_started = time.monotonic()
                 with httpx.Client(timeout=call_timeout) as client:
                     response = client.post(endpoint, headers=self._headers(), json=body)
+                call_latency_ms = round((time.monotonic() - call_started) * 1000.0, 1)
             except (httpx.TimeoutException, httpx.HTTPError) as exc:
                 if has_next:
                     next_cand = models_to_try[idx + 1]
@@ -619,11 +700,22 @@ class SeekAILLMProvider(BaseLLMProvider):
                 )
 
             usage = data.get("usage") or {}
+            # Record which model actually answered, straight from the server's own
+            # payload -- this is the proof an env-var match cannot give: the caller
+            # reads it back in the same request to attribute the decision honestly.
+            self._last_call_meta = {
+                "requested_model": models_to_try[0],
+                "resolved_model": model_name,
+                "response_model": (data.get("model") if isinstance(data, dict) else None),
+                "latency_ms": call_latency_ms,
+            }
             log.info(
                 "seekai llm completed",
                 extra={
                     "provider": self.provider_name,
                     "model": model_name,
+                    "response_model": self._last_call_meta["response_model"],
+                    "latency_ms": call_latency_ms,
                     "prompt_tokens": usage.get("prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens"),
                 },

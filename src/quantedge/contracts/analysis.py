@@ -601,6 +601,22 @@ class AIDecision(_Model):
     missing_information: list[str] = Field(default_factory=list)
     llm_provider: str | None = None
     llm_model: str | None = None
+    # Who actually made the directional call, and whether the model that answered
+    # is the model we asked for. ``decision_authority`` is one of LLM (the brain
+    # decided and the served model id matches the requested family), LLM_UNVERIFIED
+    # (the brain decided but the endpoint answered with a different model -- e.g. a
+    # glm-5.3-flash request served by MiniMax -- so the call must NOT be attributed
+    # to the requested model), DETERMINISTIC_FALLBACK (brain unreachable/errored;
+    # the gated deterministic engine decided) or MODEL_UNAVAILABLE (brain timed out
+    # or was unavailable and no honest directional call could be made). An env-var
+    # match between requested and configured model is never sufficient proof here;
+    # ``model_verified`` is set from the server-declared response model id.
+    decision_authority: str | None = None
+    decision_mode: str | None = None
+    llm_requested_model: str | None = None
+    llm_response_model: str | None = None
+    model_verified: bool | None = None
+    llm_latency_ms: float | None = None
     strategy_version: str | None = None
     scanner_version: str | None = None
     data_quality_status: QualityStatus | None = None
@@ -728,6 +744,19 @@ class TradeRecommendation(_Model):
     # emitted and still carry something the trader should know, and burying that
     # in ``rationale`` prose leaves consumers parsing sentences to find it.
     warnings: list[str] = Field(default_factory=list)
+    # Who made the directional call and whether the answering model is the one we
+    # asked for -- same contract as on AIDecision. LLM_UNVERIFIED means the brain
+    # decided but the endpoint substituted a different model, so the setup must not
+    # be attributed to the requested model; DETERMINISTIC_FALLBACK / MODEL_UNAVAILABLE
+    # mean the brain did not decide this one. ``model_verified`` comes from the
+    # server-declared response model id, not from an env-var match.
+    decision_authority: str | None = None
+    decision_mode: str | None = None
+    llm_provider: str | None = None
+    llm_requested_model: str | None = None
+    llm_response_model: str | None = None
+    model_verified: bool | None = None
+    llm_latency_ms: float | None = None
     generated_at_utc: datetime = Field(default_factory=utc_now)
 
 

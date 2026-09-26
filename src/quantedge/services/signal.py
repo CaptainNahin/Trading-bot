@@ -198,9 +198,17 @@ def generate_signal_decision(
     # single best candidate only), we fall through to the conservative reviewer path
     # below unchanged. deterministic_first skips this branch entirely and keeps the
     # reviewer as a veto-only guard -- the pre-inversion behaviour, one env flip away.
+    # Authority of the decision built on the fallthrough path below. It is
+    # DETERMINISTIC by design (deterministic_first mode, or a rate-limited sweep
+    # that deliberately did not consult the brain for this symbol). It becomes
+    # DETERMINISTIC_FALLBACK only when the brain WAS the intended authority for this
+    # symbol but returned no verdict within budget -- spec item 7: the deterministic
+    # result must then be labelled a fallback, never read as the brain's own call.
+    det_authority = "DETERMINISTIC"
+    det_mode = decision_mode()
     if (
         allow_brain
-        and decision_mode() == "llm_first"
+        and det_mode == "llm_first"
         and provider is not None
         and callable(getattr(provider, "decide_trade", None))
     ):
@@ -216,6 +224,11 @@ def generate_signal_decision(
         if brain_decision is not None:
             _persist(repo, brain_decision, context=context)
             return brain_decision
+        # The brain was the intended decision authority for this symbol but did not
+        # return a usable verdict within the request budget (timeout, rate limit,
+        # missing key, or malformed output). Mark the deterministic decision below
+        # as a fallback so nothing downstream attributes it to the AI brain.
+        det_authority = "DETERMINISTIC_FALLBACK"
 
     validated = None
     # An ARMED read (a dead-chop directional lean or a coiled breakout plan) holds
@@ -294,6 +307,8 @@ def generate_signal_decision(
         missing_information=validated.missing_information if validated is not None else [],
         llm_provider=provider.provider_name if provider is not None and validated else None,
         llm_model=provider.model_name if provider is not None and validated else None,
+        decision_authority=det_authority,
+        decision_mode=det_mode,
         scanner_version=candidate.scanner_version,
         data_quality_status=_quality_status(scan, symbol),
         created_at_utc=utc_now(),
@@ -599,6 +614,13 @@ def generate_trade_recommendation(
         upgrade_condition=decision.upgrade_condition or "",
         rationale=rationale,
         warnings=warnings,
+        decision_authority=decision.decision_authority,
+        decision_mode=decision.decision_mode,
+        llm_provider=decision.llm_provider,
+        llm_requested_model=decision.llm_requested_model,
+        llm_response_model=decision.llm_response_model,
+        model_verified=decision.model_verified,
+        llm_latency_ms=decision.llm_latency_ms,
         generated_at_utc=now,
     )
 
@@ -871,6 +893,24 @@ def _glm_decide_crypto(
     quality_status = _quality_status(scan, symbol)
     provider_name = getattr(provider, "provider_name", None)
 
+    # Model-identity honesty (spec items 4-7): the brain returns the model id the
+    # server itself declared, and whether it belongs to the family we requested.
+    # A False here means the endpoint substituted a different model (e.g. a
+    # glm-5.3-flash request answered by MiniMax); the decision is still the brain's
+    # to make, but it must NOT be attributed to the requested model. We relabel the
+    # brain to the model that actually answered and mark the authority UNVERIFIED,
+    # so no rationale string or persisted row claims GLM decided when it did not.
+    requested_model = verdict.get("requested_model")
+    response_model = verdict.get("response_model")
+    model_verified = verdict.get("model_verified")
+    latency_ms = verdict.get("latency_ms")
+    mode = decision_mode()
+    if model_verified is False:
+        authority = "LLM_UNVERIFIED"
+        brain = (response_model or f"{brain} (UNVERIFIED substitute)")
+    else:
+        authority = "LLM"
+
     if gd == "NO_TRADE":
         return AIDecision(
             decision_id=str(uuid.uuid4()),
@@ -887,6 +927,12 @@ def _glm_decide_crypto(
             invalidation_conditions=[invalidation] if invalidation else [],
             llm_provider=provider_name,
             llm_model=brain,
+            decision_authority=authority,
+            decision_mode=mode,
+            llm_requested_model=requested_model,
+            llm_response_model=response_model,
+            model_verified=model_verified,
+            llm_latency_ms=latency_ms,
             scanner_version=candidate.scanner_version,
             data_quality_status=quality_status,
             created_at_utc=utc_now(),
@@ -937,6 +983,12 @@ def _glm_decide_crypto(
         missing_information=[],
         llm_provider=provider_name,
         llm_model=brain,
+        decision_authority=authority,
+        decision_mode=mode,
+        llm_requested_model=requested_model,
+        llm_response_model=response_model,
+        model_verified=model_verified,
+        llm_latency_ms=latency_ms,
         scanner_version=candidate.scanner_version,
         data_quality_status=quality_status,
         created_at_utc=utc_now(),
@@ -1015,6 +1067,13 @@ def _armed_recommendation(
             f"({decision.direction.value.lower()}) -- no live position, size 0."
         ),
         warnings=warnings,
+        decision_authority=decision.decision_authority,
+        decision_mode=decision.decision_mode,
+        llm_provider=decision.llm_provider,
+        llm_requested_model=decision.llm_requested_model,
+        llm_response_model=decision.llm_response_model,
+        model_verified=decision.model_verified,
+        llm_latency_ms=decision.llm_latency_ms,
         generated_at_utc=now,
     )
 

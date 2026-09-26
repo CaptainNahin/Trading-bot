@@ -520,6 +520,12 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         brain: str = "deterministic",
         brain_model: str = "tv_gate_v2",
         glm_invalidation: str = "",
+        authority: str = "DETERMINISTIC",
+        decision_mode_val: str | None = None,
+        requested_model: str | None = None,
+        response_model: str | None = None,
+        model_verified: bool | None = None,
+        latency_ms: float | None = None,
     ) -> dict[str, Any]:
         """A size-0 ARMED directional lean built from the SAME real indicators.
 
@@ -578,6 +584,14 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             "brain": brain,
             "brain_model": brain_model,
             "glm_invalidation": glm_invalidation,
+            # Honest decision-authority + served-model identity telemetry, carried
+            # even on a size-0 lean so nothing downstream misattributes the call.
+            "decision_authority": authority,
+            "decision_mode": decision_mode_val,
+            "llm_requested_model": requested_model,
+            "llm_response_model": response_model,
+            "model_verified": model_verified,
+            "llm_latency_ms": latency_ms,
             "armed": True,
             "conviction_tier": ConvictionTier.ARMED,
             "size_fraction": 0.0,
@@ -629,6 +643,16 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
     glm_led = False
     direction = det_lean_dir
 
+    # Model-identity + authority telemetry (spec items 4-7,9), same contract as the
+    # crypto engine. Captured from the brain's verdict when it answers; the server's
+    # own response model id is the only proof the requested model actually decided.
+    tv_mode = decision_mode()
+    tv_req_model: str | None = None
+    tv_resp_model: str | None = None
+    tv_model_verified: bool | None = None
+    tv_latency_ms: float | None = None
+    brain_attempted = False
+
     # ---- GLM-first: the trained brain decides direction/trade-or-not, and may
     # flip the deterministic lean. Consulted BEFORE the alignment/strength gates
     # so a genuine directional read in a ranging tape is not pre-filtered away. A
@@ -643,6 +667,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         decide = getattr(provider, "decide_trade", None) if provider is not None else None
         if callable(decide):
             try:
+                brain_attempted = True
                 verdict = decide(evidence)
                 gd = verdict.get("decision")
                 if gd == "NO_TRADE":
@@ -657,6 +682,15 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
                 glm_reason = verdict.get("reason") or ""
                 glm_invalidation = verdict.get("invalidation") or ""
                 glm_led = True
+                # Identity telemetry. If the endpoint answered with a model outside
+                # the requested family, relabel to the model that actually decided --
+                # the rationale and persisted row must not claim GLM led when it did not.
+                tv_req_model = verdict.get("requested_model")
+                tv_resp_model = verdict.get("response_model")
+                tv_model_verified = verdict.get("model_verified")
+                tv_latency_ms = verdict.get("latency_ms")
+                if tv_model_verified is False:
+                    brain_model = tv_resp_model or f"{brain_model} (UNVERIFIED substitute)"
             except NoTradeReason:
                 raise
             except Exception as brain_exc:
@@ -671,11 +705,17 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         # no aligned+strong sized setup falls back to an honest, explicitly
         # labelled ARMED lean, never a refusal (real data faults are caught
         # upstream as INSUFFICIENT_DATA).
+        # If we are here in llm_first, the brain was the intended authority but did
+        # not answer within budget -- label the deterministic result a fallback so
+        # nothing downstream reads it as the brain's own call (spec item 7).
+        _fb_auth = "DETERMINISTIC_FALLBACK" if (tv_mode == "llm_first" and brain_attempted) else "DETERMINISTIC"
         if e_sign == 0 or c_sign == 0 or e_sign != c_sign:
             return _armed_lean(
                 det_lean_dir,
                 f"{exec_tf} net {e_net}/4 and {confirm_tf} net {c_net}/4 do not point the same way",
                 f"a {exec_tf}/{confirm_tf} agreement in one direction, or a pivot level breaking",
+                authority=_fb_auth,
+                decision_mode_val=tv_mode,
             )
         det_direction = SignalDirection.UP if e_sign > 0 else SignalDirection.DOWN
         if abs(e_net) < 2:
@@ -683,6 +723,8 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
                 det_direction,
                 f"execution indicators lean {det_direction.value} but only net {e_net}/4 agree",
                 "a stronger execution-timeframe agreement (at least 2 of 4 indicators)",
+                authority=_fb_auth,
+                decision_mode_val=tv_mode,
             )
         direction = det_direction
 
@@ -698,6 +740,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             decide = getattr(provider, "decide_trade", None) if provider is not None else None
             if callable(decide):
                 try:
+                    brain_attempted = True
                     verdict = decide(evidence)
                     gd = verdict.get("decision")
                     if gd == "NO_TRADE":
@@ -717,6 +760,17 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
                     conviction = verdict.get("conviction")
                     glm_reason = verdict.get("reason") or ""
                     glm_invalidation = verdict.get("invalidation") or ""
+                    # Record what the endpoint actually served. The brain only
+                    # CONFIRMED here (veto-only) -- the deterministic engine chose
+                    # the direction -- so authority stays DETERMINISTIC, but if the
+                    # served model was substituted, relabel so the confirmation is
+                    # not attributed to the requested GLM family (spec items 5-6).
+                    tv_req_model = verdict.get("requested_model")
+                    tv_resp_model = verdict.get("response_model")
+                    tv_model_verified = verdict.get("model_verified")
+                    tv_latency_ms = verdict.get("latency_ms")
+                    if tv_model_verified is False:
+                        brain_model = tv_resp_model or f"{brain_model} (UNVERIFIED substitute)"
                 except NoTradeReason:
                     raise
                 except Exception as brain_exc:
@@ -728,12 +782,36 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
     now = utc_now()
     exp = now + timedelta(minutes=minutes)
 
+    # Honest decision authority for a cleared sized setup (spec items 4,5,7,9):
+    #  - glm_led  -> the brain chose the direction (llm_first). LLM when the served
+    #    model verified as the requested family; LLM_UNVERIFIED when the endpoint
+    #    substituted a different model, so it is never credited to the GLM label.
+    #  - brain confirmed under deterministic_first (veto-only): the deterministic
+    #    engine chose -> DETERMINISTIC (model telemetry still recorded).
+    #  - no brain answer in llm_first: DETERMINISTIC_FALLBACK; else DETERMINISTIC.
+    if glm_led:
+        tv_authority = "LLM_UNVERIFIED" if tv_model_verified is False else "LLM"
+    elif tv_mode == "llm_first" and brain_attempted:
+        tv_authority = "DETERMINISTIC_FALLBACK"
+    else:
+        tv_authority = "DETERMINISTIC"
+
     # Attribution passed to an ARMED fallback only when the brain chose the
     # direction, so a GLM-led lean with no groundable level is credited honestly.
     _brain_kw = (
-        {"brain": brain, "brain_model": brain_model, "glm_invalidation": glm_invalidation}
+        {
+            "brain": brain,
+            "brain_model": brain_model,
+            "glm_invalidation": glm_invalidation,
+            "authority": tv_authority,
+            "decision_mode_val": tv_mode,
+            "requested_model": tv_req_model,
+            "response_model": tv_resp_model,
+            "model_verified": tv_model_verified,
+            "latency_ms": tv_latency_ms,
+        }
         if glm_led
-        else {}
+        else {"authority": tv_authority, "decision_mode_val": tv_mode}
     )
 
     # Stop/target from REAL pivots only -- no volatility-percent stop, no synthetic
@@ -828,6 +906,13 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         "brain": brain,
         "brain_model": brain_model,
         "glm_invalidation": glm_invalidation,
+        # Honest decision-authority + served-model identity telemetry.
+        "decision_authority": tv_authority,
+        "decision_mode": tv_mode,
+        "llm_requested_model": tv_req_model,
+        "llm_response_model": tv_resp_model,
+        "model_verified": tv_model_verified,
+        "llm_latency_ms": tv_latency_ms,
         # Uniform keys so both renderers treat sized and ARMED reads the same way.
         "armed": False,
         "conviction_tier": tier,
@@ -863,6 +948,12 @@ def _tv_build_decision(d: dict[str, Any]) -> Any:
         missing_information=[],
         llm_provider=d["brain"],
         llm_model=d["brain_model"],
+        decision_authority=d.get("decision_authority"),
+        decision_mode=d.get("decision_mode"),
+        llm_requested_model=d.get("llm_requested_model"),
+        llm_response_model=d.get("llm_response_model"),
+        model_verified=d.get("model_verified"),
+        llm_latency_ms=d.get("llm_latency_ms"),
         scanner_version="tv_gate_v2",
         data_quality_status=None,
         created_at_utc=d["now"],
@@ -907,6 +998,13 @@ def generate_tradingview_recommendation(symbol: str, minutes: int = 15) -> Any:
         upgrade_condition=d.get("upgrade_condition", ""),
         rationale=d["rationale"],
         warnings=d.get("warnings", []),
+        decision_authority=d.get("decision_authority"),
+        decision_mode=d.get("decision_mode"),
+        llm_provider=d["brain"],
+        llm_requested_model=d.get("llm_requested_model"),
+        llm_response_model=d.get("llm_response_model"),
+        model_verified=d.get("model_verified"),
+        llm_latency_ms=d.get("llm_latency_ms"),
         generated_at_utc=d["now"],
     )
     try:
