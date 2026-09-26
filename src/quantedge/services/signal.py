@@ -35,6 +35,7 @@ from quantedge.contracts import (
     TradeRecommendation,
     utc_now,
 )
+from quantedge.config import decision_mode
 from quantedge.errors import QuantEdgeError
 from quantedge.logging import get_logger
 from quantedge.providers.llm.base import BaseLLMProvider
@@ -45,7 +46,11 @@ from quantedge.services.horizons import (
     resolve_time_limit,
 )
 from quantedge.services.llm_review import validate_llm_response
-from quantedge.services.risk import MIN_ACCEPTABLE_RR, derive_risk_levels
+from quantedge.services.risk import (
+    MIN_ACCEPTABLE_RR,
+    SIZE_FRACTION_BY_TIER,
+    derive_risk_levels,
+)
 from quantedge.services.scanner import run_scan
 from quantedge.services.signal_context import build_signal_context
 from quantedge.symbols import asset_class_for
@@ -112,6 +117,7 @@ def generate_signal_decision(
     provider_name: str | None = None,
     llm_provider: BaseLLMProvider | None = None,
     candle_fetcher: Any = None,
+    allow_brain: bool = True,
 ) -> AIDecision:
     """Scan, review and persist a decision for one symbol.
 
@@ -179,6 +185,38 @@ def generate_signal_decision(
     )
 
     provider = llm_provider if llm_provider is not None else _default_llm_provider()
+
+    # llm_first (the default): the trained brain (GLM 5.3 Flash via Seek AI) is the
+    # decision authority. Hand it the full verified evidence the scan just built --
+    # every real indicator, the multi-timeframe views by role, the deterministic
+    # lean and score -- and let IT decide the direction and whether to trade at
+    # all, including flipping the deterministic lean or standing aside. The
+    # deterministic candidate is not discarded: it still grounds every price level
+    # (in generate_trade_recommendation, which grounds the returned direction) and
+    # it is the tested fallback. When the brain is unreachable within budget, or
+    # allow_brain is off (a rate-limit-bounded market sweep asks the brain about the
+    # single best candidate only), we fall through to the conservative reviewer path
+    # below unchanged. deterministic_first skips this branch entirely and keeps the
+    # reviewer as a veto-only guard -- the pre-inversion behaviour, one env flip away.
+    if (
+        allow_brain
+        and decision_mode() == "llm_first"
+        and provider is not None
+        and callable(getattr(provider, "decide_trade", None))
+    ):
+        brain_decision = _glm_decide_crypto(
+            provider,
+            candidate,
+            context,
+            symbol=symbol,
+            horizon=horizon,
+            scan=scan,
+            minutes=horizon_minutes(horizon),
+        )
+        if brain_decision is not None:
+            _persist(repo, brain_decision, context=context)
+            return brain_decision
+
     validated = None
     # An ARMED read (a dead-chop directional lean or a coiled breakout plan) holds
     # NO live position: size is 0 and its labels already say "no edge / not yet
@@ -273,6 +311,7 @@ def generate_trade_recommendation(
     candle_fetcher: Any = None,
     hold_minutes: int | None = None,
     include_watch_plan: bool = True,
+    allow_brain: bool = True,
 ) -> TradeRecommendation:
     """Produce a memory-augmented recommendation, or raise :class:`NoTradeReason`.
 
@@ -310,6 +349,7 @@ def generate_trade_recommendation(
             horizon=horizon,
             provider_name=provider_name,
             candle_fetcher=candle_fetcher,
+            allow_brain=allow_brain,
         )
     except Exception as exc:
         log.info("deterministic engine declined %s (%s); trying TradingView institutional analysis", symbol, exc)
@@ -367,57 +407,45 @@ def generate_trade_recommendation(
     # as low/no edge with its trigger, and NEVER a fabricated live stop or target
     # (honesty rule: no invented levels on a trade that does not exist).
     if decision.conviction_tier is ConvictionTier.ARMED:
-        now = utc_now()
-        ast = _resolve_asset_class(symbol, asset_class)
-        expiry = expiry_for(dur, now)
-        watch = _watch_plan(symbol, horizon, candle_fetcher) if include_watch_plan else ""
-        armed_warnings: list[str] = [
-            "ARMED / NO EDGE: this is a directional lean, not a live setup. Position "
-            "size is 0 -- do not stake a normal position on it. Wait for the trigger "
-            "below (a level breaking, or price reaching a range edge) before treating "
-            "it as a trade.",
-        ]
-        if horizon in {"1m", "3m"}:
-            armed_warnings.append(
-                f"{horizon} scalp: computed from the last CLOSED {horizon} bar polled "
-                "over REST, not a live tick stream; the bar can be up to one interval old."
-            )
-        if watch:
-            armed_warnings.append(watch)
-        return TradeRecommendation(
-            recommendation_id=f"rec-{uuid.uuid4().hex[:12]}",
-            symbol=symbol,
-            asset_class=ast,
+        return _armed_recommendation(
+            symbol,
+            decision,
             horizon=horizon,
-            direction=decision.direction,
-            valid_from_utc=now,
-            valid_until_utc=expiry,
-            reference_price=decision.reference_price,
-            stop_loss=None,
-            take_profit=None,
-            risk_reward_ratio=0.0,
-            risk_level="NO_EDGE",
-            recommended_venue=_venue_for(ast),
-            regime=decision.regime,
-            heuristic_score=decision.heuristic_score or 0.0,
-            confidence_pct=round((decision.heuristic_score or 0.0) * 100),
-            conviction_tier=ConvictionTier.ARMED,
-            position_size_fraction=0.0,
-            tier_rationale=decision.tier_rationale or "",
-            upgrade_condition=decision.upgrade_condition or "",
-            rationale=(
-                f"{decision.regime} on the {horizon} horizon, heuristic score "
-                f"{(decision.heuristic_score or 0.0):.2f}. ARMED directional lean "
-                f"({decision.direction.value.lower()}) -- no live position, size 0."
-            ),
-            warnings=armed_warnings,
-            generated_at_utc=now,
+            dur=dur,
+            asset_class=asset_class,
+            candle_fetcher=candle_fetcher,
+            include_watch_plan=include_watch_plan,
         )
 
     levels = _risk_levels_for(
         symbol, horizon, decision.direction, decision.reference_price, candle_fetcher
     )
     if levels is None:
+        # No ATR (or too few closed bars) to place an honest stop. In llm_first the
+        # brain has already named a real direction; degrade to a size-0 ARMED lean
+        # that states plainly WHY no stop is shown, rather than refusing outright --
+        # the warning names the missing input, so nothing is disguised. In
+        # deterministic_first, keep the strict INSUFFICIENT_DATA decline.
+        if decision_mode() == "llm_first":
+            return _armed_recommendation(
+                symbol,
+                decision,
+                horizon=horizon,
+                dur=dur,
+                asset_class=asset_class,
+                candle_fetcher=candle_fetcher,
+                include_watch_plan=include_watch_plan,
+                tier_rationale=(
+                    "ARMED / NO EDGE: the AI brain chose a direction, but ATR is "
+                    "unavailable for this series, so no honest stop can be placed. "
+                    "Directional lean only -- size 0."
+                ),
+                upgrade_condition="a clean volatility (ATR) read so a real stop and target can be derived",
+                extra_warning=(
+                    "No stop or target is shown because volatility (ATR) could not be "
+                    "computed for this series -- none is invented for a trade that cannot yet be sized."
+                ),
+            )
         raise NoTradeReason(
             SignalStatus.INSUFFICIENT_DATA,
             "stop and target could not be derived: ATR is unavailable for this series",
@@ -428,7 +456,35 @@ def generate_trade_recommendation(
     # even, so emitting it with a warning attached invited exactly the trade the
     # ratio says to skip. The levels are real -- ATR-derived and structural --
     # which is why the fix is to refuse the trade rather than move the target.
+    # In llm_first, the brain has still named a real direction: degrade to a
+    # size-0 ARMED lean (no invented levels) so the read stays actionable and
+    # honest, exactly as the TradingView engine does at its RR gate. In
+    # deterministic_first, keep the strict NO_TRADE decline.
     if not levels.acceptable:
+        if decision_mode() == "llm_first":
+            return _armed_recommendation(
+                symbol,
+                decision,
+                horizon=horizon,
+                dur=dur,
+                asset_class=asset_class,
+                candle_fetcher=candle_fetcher,
+                include_watch_plan=include_watch_plan,
+                tier_rationale=(
+                    f"ARMED / NO EDGE: the AI brain chose {decision.direction.value.lower()}, "
+                    f"but the reward:risk on real levels ({levels.rr:.2f}) is below the "
+                    f"{MIN_ACCEPTABLE_RR} minimum. Directional lean only -- size 0."
+                ),
+                upgrade_condition=(
+                    f"the geometry improving so a reachable structural target clears "
+                    f"reward:risk >= {MIN_ACCEPTABLE_RR}"
+                ),
+                extra_warning=(
+                    f"Levels are real ({levels.basis}) but do not clear the reward:risk "
+                    "minimum, so no sized setup is offered -- neither stop nor target is "
+                    "moved to manufacture a better ratio."
+                ),
+            )
         if not levels.target_from_structure:
             raise NoTradeReason(
                 SignalStatus.NO_TRADE,
@@ -640,7 +696,7 @@ def generate_best_trade_recommendation(
             reverse=True,
         )
 
-    for score, symbol, hz, _direction, _tier in ranked:
+    for _rank_idx, (score, symbol, hz, _direction, _tier) in enumerate(ranked):
         try:
             rec = generate_trade_recommendation(
                 symbol=symbol,
@@ -649,6 +705,12 @@ def generate_best_trade_recommendation(
                 candle_fetcher=candle_fetcher,
                 hold_minutes=time_limit_minutes,
                 include_watch_plan=False,
+                # Rate-limit + serverless-timeout bound: consult the brain (one
+                # decide_trade round-trip) on the single best-ranked candidate
+                # only; the rest use the deterministic path. Seek AI throttles the
+                # whole account to ~5 req/min, and the Vercel wall clock is 60s, so
+                # one brain call per sweep is the honest ceiling.
+                allow_brain=(_rank_idx == 0),
             )
         except NoTradeReason as exc:
             if first_decline is None:
@@ -678,6 +740,283 @@ def generate_best_trade_recommendation(
 # ---------------------------------------------------------------------- #
 # helpers                                                               #
 # ---------------------------------------------------------------------- #
+
+
+def _tier_from_conviction(conviction: Any) -> tuple[ConvictionTier, float]:
+    """Map the brain's conviction (0..1) to a conviction tier and relative size.
+
+    Used only when the brain overrode the deterministic lean, or agreed with a
+    candidate that was itself ARMED -- i.e. when there is no richer structure-aware
+    tier from the scanner to keep. The size is the RELATIVE risk multiplier from
+    ``SIZE_FRACTION_BY_TIER``, never a dollar amount or a win probability.
+    """
+    c = float(conviction) if isinstance(conviction, (int, float)) else 0.0
+    if c >= 0.7:
+        tier = ConvictionTier.A
+    elif c >= 0.45:
+        tier = ConvictionTier.B
+    else:
+        tier = ConvictionTier.ARMED
+    return tier, SIZE_FRACTION_BY_TIER[tier]
+
+
+def _tf_slice(view: Any) -> dict[str, Any]:
+    """One timeframe's real indicator + structure read, for the brain's evidence.
+
+    Every value is what the scan actually computed; ``None`` means the feature had
+    insufficient warmup, which is stated as-is rather than filled with a default.
+    """
+    f = view.features
+    s = view.structure
+    return {
+        "role": view.role,
+        "timeframe": getattr(view.timeframe, "value", str(view.timeframe)),
+        "bars_available": view.bars_available,
+        "rsi_14": f.rsi_14 if f else None,
+        "macd_histogram": f.macd_histogram if f else None,
+        "adx_14": f.adx_14 if f else None,
+        "ema_20_slope": f.ema_20_slope if f else None,
+        "atr_percent": f.atr_percent if f else None,
+        "bb_percent_b": f.bb_percent_b if f else None,
+        "structure": s.structure if s else None,
+        "nearest_support": str(s.nearest_support) if s and s.nearest_support is not None else None,
+        "nearest_resistance": (
+            str(s.nearest_resistance) if s and s.nearest_resistance is not None else None
+        ),
+    }
+
+
+def _build_crypto_evidence(candidate: Any, context: Any, minutes: int) -> dict[str, Any]:
+    """Assemble the full real evidence packet the brain decides on.
+
+    Everything here is verified data the deterministic scan already produced: the
+    per-role multi-timeframe views (execution / confirmation / regime) with their
+    real indicators and structure, the deterministic lean and its component scores,
+    the data-quality status and the event-risk classification. The brain is told
+    what the maths concluded and why -- and is free to disagree. No price level is
+    included for the brain to anchor on; levels are grounded downstream from ATR
+    and real structure, never from anything the brain says.
+    """
+    mtf = context.multi_timeframe
+    views = [_tf_slice(v) for v in mtf.views] if mtf is not None else []
+    return {
+        "symbol": candidate.symbol,
+        "asset_class": getattr(candidate.asset_class, "value", str(candidate.asset_class)),
+        "hold_minutes": minutes,
+        "horizon": candidate.horizon,
+        "price": str(candidate.reference_price),
+        "regime": getattr(candidate.regime, "value", str(candidate.regime)),
+        "deterministic_candidate": candidate.direction.value,
+        "deterministic_playbook": candidate.playbook,
+        "deterministic_score": round(candidate.heuristic_score, 3),
+        "trend_score": round(candidate.trend_score, 3),
+        "momentum_score": round(candidate.momentum_score, 3),
+        "volatility_score": round(candidate.volatility_score, 3),
+        "evidence_agreement": round(candidate.evidence_agreement_score, 3),
+        "multi_timeframe": {
+            "aligned_direction": (
+                mtf.aligned_direction.value if mtf and mtf.aligned_direction else None
+            ),
+            "alignment_score": round(mtf.alignment_score, 3) if mtf else None,
+            "participation": round(mtf.participation, 3) if mtf else None,
+            "abstaining_roles": list(mtf.abstaining_roles) if mtf else [],
+            "conflicts": list(mtf.conflicts) if mtf else [],
+            "views": views,
+        },
+        "supporting_evidence": list(candidate.supporting_evidence[:6]),
+        "contradictory_evidence": list(candidate.contradictory_evidence[:6]),
+        "data_quality": getattr(context.quality.status, "value", None) if context.quality else None,
+        "event_risk": getattr(candidate.event_risk, "value", None) if candidate.event_risk else None,
+    }
+
+
+def _glm_decide_crypto(
+    provider: Any,
+    candidate: Any,
+    context: Any,
+    *,
+    symbol: str,
+    horizon: str,
+    scan: Any,
+    minutes: int,
+) -> AIDecision | None:
+    """Let the brain decide this crypto symbol; return the AIDecision, or None.
+
+    ``None`` means the brain was unreachable within budget (no key, timeout, rate
+    limit, or a malformed response) -- the caller then falls through to the tested
+    deterministic reviewer path. A returned decision is the brain's own verdict:
+    an honest STAND_ASIDE ``NO_TRADE`` when it declines, or a ``SIGNAL`` carrying
+    the direction it chose (which may flip the deterministic lean). The brain never
+    names a price; the direction it returns is grounded into real levels downstream.
+    """
+    decide = getattr(provider, "decide_trade", None)
+    if not callable(decide):
+        return None
+    evidence = _build_crypto_evidence(candidate, context, minutes)
+    try:
+        verdict = decide(evidence)
+    except Exception as exc:
+        log.info(
+            "AI brain decide_trade unavailable for %s (%s); deterministic reviewer decides",
+            symbol,
+            type(exc).__name__,
+        )
+        return None
+
+    gd = str(verdict.get("decision", "")).upper()
+    brain = str(verdict.get("brain") or getattr(provider, "model_name", "glm"))
+    reason = str(verdict.get("reason") or "")
+    invalidation = str(verdict.get("invalidation") or "")
+    conviction = verdict.get("conviction")
+    quality_status = _quality_status(scan, symbol)
+    provider_name = getattr(provider, "provider_name", None)
+
+    if gd == "NO_TRADE":
+        return AIDecision(
+            decision_id=str(uuid.uuid4()),
+            symbol=symbol,
+            horizon=horizon,
+            status=SignalStatus.NO_TRADE,
+            reference_price=candidate.reference_price,
+            regime=candidate.regime.value,
+            heuristic_score=candidate.heuristic_score,
+            conviction_tier=ConvictionTier.STAND_ASIDE,
+            position_size_fraction=0.0,
+            tier_rationale=f"AI brain ({brain}) stood aside." + (f" {reason}" if reason else ""),
+            contradictory_evidence=[reason] if reason else ["AI brain declined this setup."],
+            invalidation_conditions=[invalidation] if invalidation else [],
+            llm_provider=provider_name,
+            llm_model=brain,
+            scanner_version=candidate.scanner_version,
+            data_quality_status=quality_status,
+            created_at_utc=utc_now(),
+        )
+
+    # __GLM_SIGNAL_PATH__
+    glm_dir = SignalDirection.UP if gd == "UP" else SignalDirection.DOWN
+
+    # When the brain confirms a sized deterministic candidate, keep the scanner's
+    # richer, structure-aware tier and size -- it was computed from the full
+    # candidate, not just a scalar conviction. When the brain overrode the lean, or
+    # the candidate was itself ARMED (no sized tier to keep), derive the tier from
+    # the brain's conviction. Either way the tier is a relative multiplier, never a
+    # win probability.
+    if glm_dir is candidate.direction and candidate.conviction_tier is not ConvictionTier.ARMED:
+        tier = candidate.conviction_tier
+        size = candidate.position_size_fraction
+        tier_rationale = candidate.tier_rationale or f"AI brain ({brain}) confirmed the {glm_dir.value} setup."
+        upgrade_condition = candidate.upgrade_condition or ""
+    else:
+        tier, size = _tier_from_conviction(conviction)
+        verb = "confirmed" if glm_dir is candidate.direction else f"overrode the deterministic {candidate.direction.value} lean and chose"
+        conv_txt = f" (conviction {float(conviction):.2f})" if isinstance(conviction, (int, float)) else ""
+        tier_rationale = f"AI brain ({brain}) {verb} {glm_dir.value}{conv_txt}." + (f" {reason}" if reason else "")
+        upgrade_condition = ""
+
+    supporting = [f"AI brain ({brain}) decided {glm_dir.value}" + (f": {reason}" if reason else "")]
+    supporting.extend(list(candidate.supporting_evidence[:4]))
+
+    return AIDecision(
+        decision_id=str(uuid.uuid4()),
+        symbol=symbol,
+        horizon=horizon,
+        status=SignalStatus.SIGNAL,
+        direction=glm_dir,
+        reference_price=candidate.reference_price,
+        expiry_utc=expiry_for(horizon_minutes(horizon), candidate.generated_at_utc),
+        regime=candidate.regime.value,
+        heuristic_score=candidate.heuristic_score,
+        calibrated_probability=None,
+        conviction_tier=tier,
+        position_size_fraction=size,
+        tier_rationale=tier_rationale,
+        upgrade_condition=upgrade_condition,
+        supporting_evidence=supporting,
+        contradictory_evidence=list(candidate.contradictory_evidence),
+        invalidation_conditions=[invalidation] if invalidation else [],
+        missing_information=[],
+        llm_provider=provider_name,
+        llm_model=brain,
+        scanner_version=candidate.scanner_version,
+        data_quality_status=quality_status,
+        created_at_utc=utc_now(),
+    )
+
+
+def _armed_recommendation(
+    symbol: str,
+    decision: AIDecision,
+    *,
+    horizon: str,
+    dur: int,
+    asset_class: AssetClass | str | None,
+    candle_fetcher: Any,
+    include_watch_plan: bool,
+    tier_rationale: str | None = None,
+    upgrade_condition: str | None = None,
+    extra_warning: str = "",
+) -> TradeRecommendation:
+    """A size-0 ARMED directional lean: a real direction, no groundable sized setup.
+
+    The honest actionable read when a direction exists (the brain's, or the
+    scanner's) but there is no sized setup to place: dead chop, a primed-but-unbroken
+    breakout, or -- in llm_first -- the brain chose a side that real levels cannot
+    yet ground into a stop and a reachable target. Size is 0, stop and target are
+    ``None`` (no level is invented for a trade that does not exist), and the trigger
+    to watch lives in ``upgrade_condition`` and the warnings. Shared by the explicit
+    ARMED branch and both llm_first degrade paths so all three read identically.
+    """
+    now = utc_now()
+    ast = _resolve_asset_class(symbol, asset_class)
+    expiry = expiry_for(dur, now)
+    watch = _watch_plan(symbol, horizon, candle_fetcher) if include_watch_plan else ""
+    warnings: list[str] = [
+        "ARMED / NO EDGE: this is a directional lean, not a live setup. Position "
+        "size is 0 -- do not stake a normal position on it. Wait for the trigger "
+        "below (a level breaking, or price reaching a range edge) before treating "
+        "it as a trade.",
+    ]
+    if extra_warning:
+        warnings.append(extra_warning)
+    if horizon in {"1m", "3m"}:
+        warnings.append(
+            f"{horizon} scalp: computed from the last CLOSED {horizon} bar polled "
+            "over REST, not a live tick stream; the bar can be up to one interval old."
+        )
+    if watch:
+        warnings.append(watch)
+    # __ARMED_REC_RETURN__
+    return TradeRecommendation(
+        recommendation_id=f"rec-{uuid.uuid4().hex[:12]}",
+        symbol=symbol,
+        asset_class=ast,
+        horizon=horizon,
+        direction=decision.direction,
+        valid_from_utc=now,
+        valid_until_utc=expiry,
+        reference_price=decision.reference_price,
+        stop_loss=None,
+        take_profit=None,
+        risk_reward_ratio=0.0,
+        risk_level="NO_EDGE",
+        recommended_venue=_venue_for(ast),
+        regime=decision.regime,
+        heuristic_score=decision.heuristic_score or 0.0,
+        confidence_pct=round((decision.heuristic_score or 0.0) * 100),
+        conviction_tier=ConvictionTier.ARMED,
+        position_size_fraction=0.0,
+        tier_rationale=(tier_rationale if tier_rationale is not None else (decision.tier_rationale or "")),
+        upgrade_condition=(
+            upgrade_condition if upgrade_condition is not None else (decision.upgrade_condition or "")
+        ),
+        rationale=(
+            f"{decision.regime} on the {horizon} horizon, heuristic score "
+            f"{(decision.heuristic_score or 0.0):.2f}. ARMED directional lean "
+            f"({decision.direction.value.lower()}) -- no live position, size 0."
+        ),
+        warnings=warnings,
+        generated_at_utc=now,
+    )
 
 
 def _reconcile_review(

@@ -351,3 +351,28 @@ def env_flag(name: str, default: bool = False) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+DecisionMode = Literal["llm_first", "deterministic_first"]
+
+
+def decision_mode() -> DecisionMode:
+    """Which brain holds final authority over direction and trade / no-trade.
+
+    ``llm_first`` (the default): the trained model (GLM 5.3 Flash via Seek AI) is
+    the decision authority. The deterministic scanner still runs -- it gathers the
+    real, verified evidence and grounds every price level -- but the model decides
+    the direction and whether to trade at all. The deterministic gate is the
+    fallback, used verbatim whenever the model is unreachable within budget, so an
+    unconfigured or rate-limited deploy degrades to the tested deterministic path
+    rather than breaking.
+
+    ``deterministic_first``: the pre-inversion behaviour, where the scanner owns
+    the direction and the model may only review/veto (never flip). Kept as a
+    reversible safety switch via ``QUANTEDGE_DECISION_MODE``.
+
+    Read from the environment directly (not cached on :class:`Settings`) so it can
+    be flipped per request in tests and toggled on the host without a code change.
+    """
+    raw = (os.getenv("QUANTEDGE_DECISION_MODE") or "llm_first").strip().lower()
+    return "deterministic_first" if raw == "deterministic_first" else "llm_first"

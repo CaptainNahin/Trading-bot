@@ -481,6 +481,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
     import uuid
     from datetime import timedelta
     from decimal import Decimal
+    from quantedge.config import decision_mode
     from quantedge.contracts import ConvictionTier, SignalDirection, SignalStatus, utc_now
     from quantedge.services.horizons import horizon_for_minutes
     from quantedge.services.risk import MIN_ACCEPTABLE_RR, SIZE_FRACTION_BY_TIER
@@ -511,7 +512,15 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
     e_sign = 1 if e_net > 0 else (-1 if e_net < 0 else 0)
     c_sign = 1 if c_net > 0 else (-1 if c_net < 0 else 0)
 
-    def _armed_lean(direction: Any, reason: str, upgrade: str) -> dict[str, Any]:
+    def _armed_lean(
+        direction: Any,
+        reason: str,
+        upgrade: str,
+        *,
+        brain: str = "deterministic",
+        brain_model: str = "tv_gate_v2",
+        glm_invalidation: str = "",
+    ) -> dict[str, Any]:
         """A size-0 ARMED directional lean built from the SAME real indicators.
 
         The honest read when there is a direction but no favourable *sized* trade
@@ -522,6 +531,10 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         than refusing. No fabricated stop/target -- none exists, so none is
         invented; the trigger lives in ``upgrade_condition``. A genuine data fault
         (INSUFFICIENT_DATA) or a hard brain conflict is still a real NO_TRADE.
+
+        ``brain`` records who chose the direction: the deterministic gate, or the
+        GLM brain when it led and picked a side for which no groundable sized setup
+        exists yet. The attribution stays truthful either way.
         """
         _now = utc_now()
         _su = sym.upper()
@@ -535,6 +548,11 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             _ast = "crypto"
         _agree = (abs(e_net) + abs(c_net)) / 8.0
         _trend = (exec_a.get("market_structure") or {}).get("trend") or direction.value
+        _lead = (
+            f"AI brain ({brain_model}) leans {direction.value}"
+            if brain == "seekai"
+            else f"ARMED lean ({direction.value})"
+        )
         return {
             "decision_id": f"rec-tv-{uuid.uuid4().hex[:10]}",
             "symbol": sym,
@@ -553,13 +571,13 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             "confidence": max(45, min(60, 50 + round(_agree * 40))),
             "regime": _trend,
             "rationale": (
-                f"ARMED lean ({direction.value}) on {sym} from real {exec_tf}/{confirm_tf} "
+                f"{_lead} on {sym} from real {exec_tf}/{confirm_tf} "
                 f"indicators: {reason}. No live position -- size 0, and no stop/target is "
                 "invented for a trade that does not exist."
             ),
-            "brain": "deterministic",
-            "brain_model": "tv_gate_v2",
-            "glm_invalidation": "",
+            "brain": brain,
+            "brain_model": brain_model,
+            "glm_invalidation": glm_invalidation,
             "armed": True,
             "conviction_tier": ConvictionTier.ARMED,
             "size_fraction": 0.0,
@@ -575,38 +593,23 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             ],
         }
 
-    # Multi-timeframe alignment gate. Previously a hard NO_TRADE whenever the two
-    # timeframes disagreed; that rejected most ranging/chop markets, which is the
-    # exact false-NO_TRADE the directive removes. Now: no aligned+strong sized
-    # setup -> fall back to an honest, explicitly-labelled ARMED lean, never a
-    # refusal (real data faults are still caught upstream as INSUFFICIENT_DATA).
-    if e_sign == 0 or c_sign == 0 or e_sign != c_sign:
-        lean_sign = e_sign or c_sign
-        if lean_sign == 0:
-            # Both timeframes truly flat: tiebreak on price vs the central pivot so
-            # the lean is derived from real structure, not defaulted to UP.
-            piv = (exec_a.get("pivots") or {}).get("P")
-            lean_sign = 1 if (piv is None or float(price_val) >= float(piv)) else -1
-        lean_dir = SignalDirection.UP if lean_sign > 0 else SignalDirection.DOWN
-        return _armed_lean(
-            lean_dir,
-            f"{exec_tf} net {e_net}/4 and {confirm_tf} net {c_net}/4 do not point the same way",
-            f"a {exec_tf}/{confirm_tf} agreement in one direction, or a pivot level breaking",
-        )
-    det_direction = SignalDirection.UP if e_sign > 0 else SignalDirection.DOWN
-    if abs(e_net) < 2:
-        return _armed_lean(
-            det_direction,
-            f"execution indicators lean {det_direction.value} but only net {e_net}/4 agree",
-            "a stronger execution-timeframe agreement (at least 2 of 4 indicators)",
-        )
-
     price = Decimal(str(price_val))
     pivots = exec_a.get("pivots") or {}
     bb = exec_a.get("bollinger_bands") or {}
 
-    # Hand the REAL evidence to the AI brain to DECIDE. GLM leads when reachable;
-    # the deterministic gate above is the guardrail and the fallback.
+    # Deterministic lean direction from the real indicators. In llm_first this is
+    # only a candidate handed to the brain (which may flip it); in the fallback it
+    # is the decision. Flat-on-both tiebreaks on price vs the central pivot so the
+    # lean is derived from real structure, never defaulted to UP.
+    det_lean_sign = e_sign or c_sign
+    if det_lean_sign == 0:
+        piv = pivots.get("P")
+        det_lean_sign = 1 if (piv is None or float(price_val) >= float(piv)) else -1
+    det_lean_dir = SignalDirection.UP if det_lean_sign > 0 else SignalDirection.DOWN
+
+    # Hand the REAL evidence to the AI brain to DECIDE. GLM is the decision
+    # authority in llm_first (it may flip the deterministic lean); the
+    # deterministic alignment/strength gates below are the guardrail and fallback.
     evidence = {
         "symbol": sym,
         "venue": venue,
@@ -616,50 +619,122 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         "price": price_val,
         "execution": _evidence_slice(exec_a, exec_vote),
         "confirmation": _evidence_slice(confirm_a, confirm_vote),
-        "deterministic_candidate": det_direction.value,
+        "deterministic_candidate": det_lean_dir.value,
         "deterministic_agreement": f"exec {abs(e_net)}/4, confirm {abs(c_net)}/4",
     }
 
     brain, brain_model = "deterministic", "tv_gate_v2"
     conviction: float | None = None
     glm_reason = glm_invalidation = ""
-    direction = det_direction
+    glm_led = False
+    direction = det_lean_dir
 
-    try:
-        from quantedge.providers.llm import default_llm_provider
-        provider = default_llm_provider()
-    except Exception:
-        provider = None
-    decide = getattr(provider, "decide_trade", None) if provider is not None else None
-    if callable(decide):
+    # ---- GLM-first: the trained brain decides direction/trade-or-not, and may
+    # flip the deterministic lean. Consulted BEFORE the alignment/strength gates
+    # so a genuine directional read in a ranging tape is not pre-filtered away. A
+    # brain NO_TRADE is a real abstention (raised). Unreachable within budget ->
+    # fall through to the deterministic gates (glm_led stays False).
+    if decision_mode() == "llm_first":
         try:
-            verdict = decide(evidence)
-            gd = verdict.get("decision")
-            if gd == "NO_TRADE":
-                raise NoTradeReason(
-                    SignalStatus.NO_TRADE,
-                    f"{sym}: AI brain ({verdict.get('brain', 'glm')}) declined despite alignment",
-                    detail=verdict.get("reason") or "",
+            from quantedge.providers.llm import default_llm_provider
+            provider = default_llm_provider()
+        except Exception:
+            provider = None
+        decide = getattr(provider, "decide_trade", None) if provider is not None else None
+        if callable(decide):
+            try:
+                verdict = decide(evidence)
+                gd = verdict.get("decision")
+                if gd == "NO_TRADE":
+                    raise NoTradeReason(
+                        SignalStatus.NO_TRADE,
+                        f"{sym}: AI brain ({verdict.get('brain', 'glm')}) decided not to trade on the live evidence",
+                        detail=verdict.get("reason") or "",
+                    )
+                direction = SignalDirection.UP if gd == "UP" else SignalDirection.DOWN
+                brain, brain_model = "seekai", str(verdict.get("brain") or "glm-5.3-flash")
+                conviction = verdict.get("conviction")
+                glm_reason = verdict.get("reason") or ""
+                glm_invalidation = verdict.get("invalidation") or ""
+                glm_led = True
+            except NoTradeReason:
+                raise
+            except Exception as brain_exc:
+                log.info(
+                    "AI brain decide_trade unavailable for %s (%s); deterministic decision leads",
+                    sym, type(brain_exc).__name__,
                 )
-            gdir = SignalDirection.UP if gd == "UP" else SignalDirection.DOWN
-            if gdir != det_direction:
-                raise NoTradeReason(
-                    SignalStatus.NO_TRADE,
-                    f"{sym}: AI brain disagrees with aligned multi-timeframe evidence; standing aside",
-                    detail=verdict.get("reason") or "",
-                )
-            direction = gdir
-            brain, brain_model = "seekai", str(verdict.get("brain") or "glm-5.3-flash")
-            conviction = verdict.get("conviction")
-            glm_reason = verdict.get("reason") or ""
-            glm_invalidation = verdict.get("invalidation") or ""
-        except NoTradeReason:
-            raise
-        except Exception as brain_exc:
-            log.info("AI brain decide_trade unavailable for %s (%s); deterministic decision stands", sym, type(brain_exc).__name__)
+
+    if not glm_led:
+        # Deterministic decision: the fallback when the brain is unreachable, and
+        # the full path in deterministic_first. Multi-timeframe alignment gate --
+        # no aligned+strong sized setup falls back to an honest, explicitly
+        # labelled ARMED lean, never a refusal (real data faults are caught
+        # upstream as INSUFFICIENT_DATA).
+        if e_sign == 0 or c_sign == 0 or e_sign != c_sign:
+            return _armed_lean(
+                det_lean_dir,
+                f"{exec_tf} net {e_net}/4 and {confirm_tf} net {c_net}/4 do not point the same way",
+                f"a {exec_tf}/{confirm_tf} agreement in one direction, or a pivot level breaking",
+            )
+        det_direction = SignalDirection.UP if e_sign > 0 else SignalDirection.DOWN
+        if abs(e_net) < 2:
+            return _armed_lean(
+                det_direction,
+                f"execution indicators lean {det_direction.value} but only net {e_net}/4 agree",
+                "a stronger execution-timeframe agreement (at least 2 of 4 indicators)",
+            )
+        direction = det_direction
+
+        # In deterministic_first the brain may still review the aligned candidate
+        # (veto-only -- it can confirm or stand the trade down, never flip it). In
+        # the llm_first fallback the brain was already unreachable, so no second call.
+        if decision_mode() == "deterministic_first":
+            try:
+                from quantedge.providers.llm import default_llm_provider
+                provider = default_llm_provider()
+            except Exception:
+                provider = None
+            decide = getattr(provider, "decide_trade", None) if provider is not None else None
+            if callable(decide):
+                try:
+                    verdict = decide(evidence)
+                    gd = verdict.get("decision")
+                    if gd == "NO_TRADE":
+                        raise NoTradeReason(
+                            SignalStatus.NO_TRADE,
+                            f"{sym}: AI brain ({verdict.get('brain', 'glm')}) declined despite alignment",
+                            detail=verdict.get("reason") or "",
+                        )
+                    gdir = SignalDirection.UP if gd == "UP" else SignalDirection.DOWN
+                    if gdir != det_direction:
+                        raise NoTradeReason(
+                            SignalStatus.NO_TRADE,
+                            f"{sym}: AI brain disagrees with aligned multi-timeframe evidence; standing aside",
+                            detail=verdict.get("reason") or "",
+                        )
+                    brain, brain_model = "seekai", str(verdict.get("brain") or "glm-5.3-flash")
+                    conviction = verdict.get("conviction")
+                    glm_reason = verdict.get("reason") or ""
+                    glm_invalidation = verdict.get("invalidation") or ""
+                except NoTradeReason:
+                    raise
+                except Exception as brain_exc:
+                    log.info(
+                        "AI brain decide_trade unavailable for %s (%s); deterministic decision stands",
+                        sym, type(brain_exc).__name__,
+                    )
 
     now = utc_now()
     exp = now + timedelta(minutes=minutes)
+
+    # Attribution passed to an ARMED fallback only when the brain chose the
+    # direction, so a GLM-led lean with no groundable level is credited honestly.
+    _brain_kw = (
+        {"brain": brain, "brain_model": brain_model, "glm_invalidation": glm_invalidation}
+        if glm_led
+        else {}
+    )
 
     # Stop/target from REAL pivots only -- no volatility-percent stop, no synthetic
     # 2R target. When the structure to place a stop or a reachable target isn't
@@ -671,6 +746,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             direction,
             "no real pivot structure yet to place a stop and a reachable target",
             "a pivot level forming so a real stop and target can be set",
+            **_brain_kw,
         )
     stop, target, rr, basis = levels
     if rr < MIN_ACCEPTABLE_RR:
@@ -678,6 +754,7 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             direction,
             f"reward:risk {rr:.2f} is below the {MIN_ACCEPTABLE_RR} minimum on real pivots",
             f"the geometry improving so a reachable target clears reward:risk >= {MIN_ACCEPTABLE_RR}",
+            **_brain_kw,
         )
 
     # 3. Asset class
@@ -701,10 +778,21 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
 
     trend = (exec_a.get("market_structure") or {}).get("trend") or direction.value
     squeeze_note = " Bollinger squeeze active (breakout pending)." if bb.get("squeeze") else ""
-    if brain == "seekai":
+    aligned = (e_sign != 0 and c_sign != 0 and e_sign == c_sign)
+    if glm_led:
+        _agree_note = (
+            f"confirmed by {exec_tf}/{confirm_tf} alignment ({abs(e_net)}/4 and {abs(c_net)}/4 real indicators agree)"
+            if aligned and direction == det_lean_dir
+            else f"on the live {exec_tf}/{confirm_tf} evidence (deterministic lean was {det_lean_dir.value})"
+        )
         rationale = (
-            f"AI brain ({brain_model}) decided {direction.value}, confirmed by {exec_tf}/{confirm_tf} "
-            f"alignment ({abs(e_net)}/4 and {abs(c_net)}/4 real indicators agree). {glm_reason}{squeeze_note}"
+            f"AI brain ({brain_model}) decided {direction.value}, {_agree_note}; "
+            f"levels grounded on real pivots ({basis}). {glm_reason}{squeeze_note}"
+        )
+    elif brain == "seekai":
+        rationale = (
+            f"AI brain ({brain_model}) confirmed {direction.value}, aligned with {exec_tf}/{confirm_tf} "
+            f"({abs(e_net)}/4 and {abs(c_net)}/4 real indicators agree); levels from real pivots ({basis}). {glm_reason}{squeeze_note}"
         )
     else:
         rationale = (
@@ -712,6 +800,13 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
             f"({abs(e_net)}/4 and {abs(c_net)}/4 real indicators agree); levels from real pivots ({basis})."
             f"{squeeze_note} AI brain unavailable within budget."
         )
+
+    # A cleared sized setup is A or B. When the brain led, tier follows its
+    # conviction; on the deterministic path it follows multi-timeframe agreement.
+    if glm_led:
+        tier = ConvictionTier.A if (conviction or 0.0) >= 0.7 else ConvictionTier.B
+    else:
+        tier = ConvictionTier.A if agreement >= 0.75 else ConvictionTier.B
 
     return {
         "decision_id": f"rec-tv-{uuid.uuid4().hex[:10]}",
@@ -734,12 +829,9 @@ def _tradingview_decision_core(symbol: str, minutes: int) -> dict[str, Any]:
         "brain_model": brain_model,
         "glm_invalidation": glm_invalidation,
         # Uniform keys so both renderers treat sized and ARMED reads the same way.
-        # A cleared sized setup is A (broad agreement) or B (thinner but RR-gated).
         "armed": False,
-        "conviction_tier": ConvictionTier.A if agreement >= 0.75 else ConvictionTier.B,
-        "size_fraction": SIZE_FRACTION_BY_TIER[
-            ConvictionTier.A if agreement >= 0.75 else ConvictionTier.B
-        ],
+        "conviction_tier": tier,
+        "size_fraction": SIZE_FRACTION_BY_TIER[tier],
         "tier_rationale": "",
         "upgrade_condition": "",
         "warnings": [],
