@@ -341,15 +341,22 @@ class SeekAILLMProvider(BaseLLMProvider):
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            # A bounded UP/DOWN/NO_TRADE verdict plus a one-sentence reason needs
-            # few output tokens. The old 1200 let a reasoning model spend the whole
-            # serverless window emitting <think> tokens -- measured >55s locally and
-            # a Cloudflare 504 at ~61s upstream, i.e. it could never return inside
-            # the 60s host wall. Capping output (with the no-reasoning directive
-            # above) brings the same verdict back in ~25-35s, which fits. Full
-            # deliberation, if wanted, belongs on the decoupled precompute path,
-            # not on the synchronous request.
-            max_tokens=500,
+            # The served model (MiniMax-M2.7) is a reasoning model that ALWAYS emits
+            # a <think> block first and ignores the no-reasoning directive above.
+            # Under json_object mode it does NOT ramble to fill max_tokens -- it
+            # stops the moment the JSON object is closed (measured: finish_reason
+            # "stop" at ~355 completion tokens). So max_tokens here is a SAFETY
+            # ceiling, not a latency target. The old 500 was below the real
+            # evidence packet's think block (~485 tokens), so the JSON that followed
+            # was guillotined mid-object -> finish_reason "length" -> prod fell back
+            # on every call with "model reply was not valid JSON". 1500 clears the
+            # think block plus the verdict with headroom on complex setups; the
+            # model still stops naturally well short of it. (The pre-json_object
+            # 1200->55s/504 ramble does not recur: json_object gives the model a
+            # stop condition it did not have then.) The deadline clamp still bounds
+            # the wall-clock: a slow-tail call is cut at min(40s, time left) and
+            # degrades to an honest DETERMINISTIC_FALLBACK, never a 504.
+            max_tokens=1500,
             temperature=0.1,
             timeout=budget,
             primary_only=True,
